@@ -12,15 +12,20 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "admin": "node dist/cli.js"
   },
   "dependencies": {
     "oidc-provider": "9.13.0"
   },
   "devDependencies": {
     "@types/node": "26.6.5",
+    "@types/oidc-provider": "9.12.1",
     "openid-client": "6.8.8",
     "typescript": "7.0.2",
     "vitest": "4.1.12"
+  },
+  "bin": {
+    "mamori-admin": "dist/cli.js"
   }
 }

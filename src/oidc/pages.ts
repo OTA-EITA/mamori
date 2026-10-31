@@ -1,0 +1,53 @@
+const escape = (s: string) =>
+  s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+
+function page(title: string, body: string): string {
+  return `<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escape(title)}</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #f4f5f7; margin: 0; }
+  main { max-width: 22rem; margin: 10vh auto; background: #fff; padding: 2rem; border-radius: 8px; }
+  label { display: block; margin-top: 1rem; font-size: .9rem; }
+  input { width: 100%; box-sizing: border-box; padding: .6rem; margin-top: .3rem; font-size: 1rem; }
+  button { width: 100%; margin-top: 1.5rem; padding: .7rem; font-size: 1rem; }
+  .error { color: #b00020; }
+</style>
+</head>
+<body><main>${body}</main></body>
+</html>`;
+}
+
+export function loginPage(uid: string, opts: { client: string; email?: string; error?: string }): string {
+  return page(
+    'Sign in',
+    `<h1>Sign in</h1>
+<p>to ${escape(opts.client)}</p>
+${opts.error ? `<p class="error">${escape(opts.error)}</p>` : ''}
+<form method="post" action="/interaction/${escape(uid)}/login">
+  <label>Email<input type="email" name="email" autocomplete="username" required autofocus value="${escape(opts.email ?? '')}"></label>
+  <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
+  <button type="submit">Sign in</button>
+</form>`,
+  );
+}
+
+export function totpPage(uid: string, opts: { error?: string }): string {
+  return page(
+    'Verification code',
+    `<h1>Verification code</h1>
+<p>Enter the 6-digit code from your authenticator app.</p>
+${opts.error ? `<p class="error">${escape(opts.error)}</p>` : ''}
+<form method="post" action="/interaction/${escape(uid)}/totp">
+  <label>Code<input name="code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required autofocus></label>
+  <button type="submit">Verify</button>
+</form>`,
+  );
+}
+
+export function errorPage(message: string): string {
+  return page('Error', `<h1>Something went wrong</h1><p>${escape(message)}</p>`);
+}
