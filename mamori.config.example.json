@@ -1,6 +1,7 @@
 {
   "issuer": "https://id.example.co.jp",
   "port": 3000,
+  "trustProxy": true,
   "database": "mamori.db",
   "totpIssuer": "Example Co",
   "clients": [

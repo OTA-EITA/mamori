@@ -5,6 +5,9 @@ export interface MamoriConfig {
   // Public URL of this server, e.g. https://id.example.co.jp
   issuer: string;
   port: number;
+  // Set to true only when mamori is behind a reverse proxy you run, which
+  // overwrites or appends X-Forwarded-For / -Proto / -Host.
+  trustProxy?: boolean;
   database: string;
   // Name shown in authenticator apps next to the account.
   totpIssuer: string;
@@ -17,6 +20,7 @@ export function loadConfig(path: string): MamoriConfig {
   return {
     issuer: raw.issuer,
     port: raw.port ?? 3000,
+    trustProxy: raw.trustProxy ?? false,
     database: raw.database ?? 'mamori.db',
     totpIssuer: raw.totpIssuer ?? new URL(raw.issuer).hostname,
     clients: raw.clients ?? [],

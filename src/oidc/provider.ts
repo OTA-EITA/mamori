@@ -33,7 +33,7 @@ export function createProvider(config: MamoriConfig, db: DatabaseSync, users: Us
     },
   };
   const provider = new Provider(config.issuer, configuration);
-  // Behind a reverse proxy that terminates TLS.
-  provider.proxy = true;
+  // Only believe X-Forwarded-* when the admin says there is a proxy in front.
+  provider.proxy = config.trustProxy ?? false;
   return provider;
 }
