@@ -1,0 +1,14 @@
+{
+  "issuer": "https://id.example.co.jp",
+  "port": 3000,
+  "database": "mamori.db",
+  "totpIssuer": "Example Co",
+  "clients": [
+    {
+      "client_id": "intranet",
+      "client_secret": "change-me-to-a-long-random-value",
+      "client_name": "Intranet",
+      "redirect_uris": ["https://intranet.example.co.jp/auth/callback"]
+    }
+  ]
+}
