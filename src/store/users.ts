@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
+import { revokeAccount } from './oidcAdapter.js';
 import { hashPassword, verifyPassword } from './password.js';
 
 export interface User {
@@ -71,8 +72,10 @@ export class UserStore {
     this.db.prepare('UPDATE users SET totp_last_counter = ? WHERE id = ?').run(counter, id);
   }
 
+  // Disabling also signs the user out of every app, not only future sign-ins.
   setDisabled(id: string, disabled: boolean): void {
     this.db.prepare('UPDATE users SET disabled = ? WHERE id = ?').run(disabled ? 1 : 0, id);
+    if (disabled) revokeAccount(this.db, id);
   }
 }
 

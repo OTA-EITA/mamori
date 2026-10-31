@@ -22,10 +22,11 @@ export class SqliteAdapter implements Adapter {
   async upsert(id: string, payload: AdapterPayload, expiresIn?: number): Promise<void> {
     this.db
       .prepare(
-        `INSERT INTO oidc_models (model, id, payload, grant_id, user_code, uid, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO oidc_models (model, id, payload, grant_id, user_code, uid, account_id, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (model, id) DO UPDATE SET payload = excluded.payload, grant_id = excluded.grant_id,
-           user_code = excluded.user_code, uid = excluded.uid, expires_at = excluded.expires_at`,
+           user_code = excluded.user_code, uid = excluded.uid, account_id = excluded.account_id,
+           expires_at = excluded.expires_at`,
       )
       .run(
         this.model,
@@ -34,6 +35,7 @@ export class SqliteAdapter implements Adapter {
         payload.grantId ?? null,
         payload.userCode ?? null,
         payload.uid ?? null,
+        payload.accountId ?? null,
         expiresIn ? now() + expiresIn : null,
       );
   }
@@ -71,6 +73,11 @@ export class SqliteAdapter implements Adapter {
     const payload = JSON.parse(r.payload) as AdapterPayload;
     return r.consumed_at === null ? payload : { ...payload, consumed: r.consumed_at };
   }
+}
+
+// Signs a user out everywhere: their sessions, grants, codes and tokens.
+export function revokeAccount(db: DatabaseSync, accountId: string): number {
+  return Number(db.prepare('DELETE FROM oidc_models WHERE account_id = ?').run(accountId).changes);
 }
 
 // Expired rows are never returned, but they still take space. Call this from a
