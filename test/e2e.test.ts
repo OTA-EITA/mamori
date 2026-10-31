@@ -86,9 +86,8 @@ beforeAll(async () => {
     db,
     users,
   );
-  // Tests talk plain HTTP to 127.0.0.1, so do not trust proxy headers.
-  provider.proxy = false;
-  handler = createRequestHandler(provider, users);
+  // No real waiting for the throttling delays in tests.
+  handler = createRequestHandler(provider, users, { sleep: async () => {} });
   await users.create({ email: 'alice@example.com', name: 'Alice', password: 'alice-password-1' });
   const carol = await users.create({ email: 'carol@example.com', name: 'Carol', password: 'carol-password' });
   users.setDisabled(carol.id, true);

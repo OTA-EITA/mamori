@@ -1,13 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import type { UserStore } from './store/users.js';
-import { interactionHandler } from './oidc/interactions.js';
+import { interactionHandler, type InteractionOptions } from './oidc/interactions.js';
 import { errorPage } from './oidc/pages.js';
 
 const INTERACTION = /^\/interaction\/([\w-]+)(?:\/(login|totp))?$/;
 
-export function createRequestHandler(provider: Provider, users: UserStore, now?: () => number) {
-  const interactions = interactionHandler(provider, users, now);
+export function createRequestHandler(provider: Provider, users: UserStore, opts: InteractionOptions = {}) {
+  const interactions = interactionHandler(provider, users, opts);
   const oidc = provider.callback();
   return (req: IncomingMessage, res: ServerResponse): void => {
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
@@ -31,6 +31,6 @@ export function createRequestHandler(provider: Provider, users: UserStore, now?:
   };
 }
 
-export function createMamoriServer(provider: Provider, users: UserStore, now?: () => number): Server {
-  return createServer(createRequestHandler(provider, users, now));
+export function createMamoriServer(provider: Provider, users: UserStore, opts: InteractionOptions = {}): Server {
+  return createServer(createRequestHandler(provider, users, opts));
 }

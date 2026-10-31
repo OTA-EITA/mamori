@@ -12,6 +12,6 @@ const provider = createProvider(config, db, users);
 
 setInterval(() => deleteExpired(db), 60 * 60 * 1000).unref();
 
-createMamoriServer(provider, users).listen(config.port, () => {
+createMamoriServer(provider, users, { trustProxy: config.trustProxy ?? false }).listen(config.port, () => {
   console.log(`mamori listening on :${config.port}, issuer ${config.issuer}`);
 });
