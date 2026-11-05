@@ -1,8 +1,7 @@
 name: scorecard
 
-# OpenSSF Scorecard: supply-chain security checks, shown in the repository's
-# code scanning results. Set publish_results to true to also publish them to
-# the public OpenSSF dashboard (needed for the README badge).
+# OpenSSF Scorecard: supply-chain security checks, published to the public
+# dashboard and shown as a badge in the README.
 on:
   push:
     branches: [main]
@@ -26,7 +25,7 @@ jobs:
         with:
           results_file: results.sarif
           results_format: sarif
-          publish_results: false
+          publish_results: true
       - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
         with:
           sarif_file: results.sarif

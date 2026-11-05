@@ -1,6 +1,7 @@
 # mamori
 
 [![ci](https://github.com/OTA-EITA/mamori/actions/workflows/ci.yml/badge.svg)](https://github.com/OTA-EITA/mamori/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/OTA-EITA/mamori/badge)](https://securityscorecards.dev/viewer/?uri=github.com/OTA-EITA/mamori)
 
 A small, self-hosted identity provider for teams of 10 to 100 people: OpenID Connect single sign-on, TOTP and passkeys, and (planned) SCIM and provisioning connectors for the SaaS tools Japanese companies use.
 
