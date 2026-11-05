@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type Provider from 'oidc-provider';
 import { decodeBase32 } from '../totp/base32.js';
 import { verifyTotp } from '../totp/totp.js';
+import type { AuditLog } from '../audit/audit.js';
 import type { UserStore } from '../store/users.js';
 import { clientIp } from '../clientIp.js';
 import { SignInThrottle } from './throttle.js';
@@ -29,6 +30,7 @@ function send(res: ServerResponse, status: number, html: string): void {
 }
 
 export interface InteractionOptions {
+  audit?: AuditLog;
   trustProxy?: boolean;
   now?: () => number;
   sleep?: (seconds: number) => Promise<void>;
@@ -40,6 +42,7 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
   const now = opts.now ?? (() => Math.floor(Date.now() / 1000));
   const sleep = opts.sleep ?? realSleep;
   const throttle = new SignInThrottle(now);
+  const audit = opts.audit;
   // Users who passed the password step and still owe a TOTP code, keyed by interaction uid.
   const pendingTotp = new Map<string, { accountId: string; expires: number }>();
 
@@ -68,6 +71,9 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
     const client = await provider.Client.find(details.params.client_id as string);
     const ip = clientIp(req, opts.trustProxy ?? false);
     const clientName = client?.clientName ?? (details.params.client_id as string);
+    const userAgent = req.headers['user-agent'];
+    const log = (event: string, email: string, extra: Record<string, unknown> = {}, id?: string) =>
+      audit?.write({ event, actor: { type: 'user', email, ...(id ? { id } : {}) }, client_id: details.params.client_id as string, ip, ...(userAgent ? { user_agent: userAgent } : {}), ...extra });
 
     if (req.method === 'GET' && action === undefined) {
       if (details.prompt.name === 'consent') return grantConsent(req, res);
@@ -78,12 +84,14 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
       const form = await readForm(req);
       const email = (form.get('email') ?? '').trim().toLowerCase();
       if (throttle.isLocked(email, ip)) {
+        log('sign_in.throttled', email);
         return send(res, 429, loginPage(uid, { client: clientName, email, error: 'Too many failed attempts. Try again in 15 minutes.' }));
       }
       await sleep(throttle.delaySeconds(email));
       const user = await users.authenticate(email, form.get('password') ?? '');
       if (!user) {
         throttle.fail(email, ip);
+        log('sign_in.failed', email, { reason: 'wrong_password' });
         return send(res, 401, loginPage(uid, { client: clientName, email, error: 'The email or password is not correct.' }));
       }
       if (user.totpSecret) {
@@ -91,6 +99,8 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
         return send(res, 200, totpPage(uid, {}));
       }
       throttle.succeed(email, ip);
+      users.setLastSignIn(user.id, new Date(now() * 1000));
+      log('sign_in.succeeded', user.email, { amr: ['pwd'] }, user.id);
       return finishLogin(req, res, user.id, ['pwd']);
     }
 
@@ -106,6 +116,7 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
       // the password could try codes as fast as the server answers.
       if (throttle.isLocked(key, ip)) {
         pendingTotp.delete(uid);
+        log('sign_in.throttled', key, { step: 'otp' }, user?.id);
         return send(res, 429, loginPage(uid, { client: clientName, error: 'Too many failed attempts. Try again in 15 minutes.' }));
       }
       await sleep(throttle.delaySeconds(key));
@@ -116,12 +127,15 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
         : { ok: false };
       if (!user || !result.ok || result.counter === undefined) {
         throttle.fail(key, ip);
+        log('mfa.challenge_failed', key, { method: 'otp' }, user?.id);
         if (throttle.isLocked(key, ip)) pendingTotp.delete(uid);
         return send(res, 401, totpPage(uid, { error: 'The code is not correct.' }));
       }
       pendingTotp.delete(uid);
       users.setTotpLastCounter(user.id, result.counter);
       throttle.succeed(user.email.toLowerCase(), ip);
+      users.setLastSignIn(user.id, new Date(now() * 1000));
+      log('sign_in.succeeded', user.email, { amr: ['pwd', 'otp'] }, user.id);
       return finishLogin(req, res, user.id, ['pwd', 'otp']);
     }
 

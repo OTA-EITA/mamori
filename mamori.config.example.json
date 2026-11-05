@@ -4,6 +4,8 @@
   "trustProxy": true,
   "database": "mamori.db",
   "totpIssuer": "Example Co",
+  "auditLog": "-",
+  "auditRetentionDays": 400,
   "clients": [
     {
       "client_id": "intranet",

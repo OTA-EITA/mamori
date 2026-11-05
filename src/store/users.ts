@@ -10,6 +10,8 @@ export interface User {
   totpSecret: string | null;
   totpLastCounter: number | null;
   disabled: boolean;
+  isAdmin: boolean;
+  lastSignInAt: string | null;
 }
 
 interface UserRow {
@@ -20,6 +22,8 @@ interface UserRow {
   totp_secret: string | null;
   totp_last_counter: number | null;
   disabled: number;
+  is_admin: number;
+  last_sign_in_at: string | null;
 }
 
 function toUser(row: UserRow): User {
@@ -30,6 +34,8 @@ function toUser(row: UserRow): User {
     totpSecret: row.totp_secret,
     totpLastCounter: row.totp_last_counter,
     disabled: row.disabled === 1,
+    isAdmin: row.is_admin === 1,
+    lastSignInAt: row.last_sign_in_at,
   };
 }
 
@@ -66,6 +72,10 @@ export class UserStore {
 
   setTotpSecret(id: string, secret: string | null): void {
     this.db.prepare('UPDATE users SET totp_secret = ?, totp_last_counter = NULL WHERE id = ?').run(secret, id);
+  }
+
+  setLastSignIn(id: string, at: Date): void {
+    this.db.prepare('UPDATE users SET last_sign_in_at = ? WHERE id = ?').run(at.toISOString(), id);
   }
 
   setTotpLastCounter(id: string, counter: number): void {

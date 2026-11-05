@@ -12,6 +12,10 @@ export interface MamoriConfig {
   // Name shown in authenticator apps next to the account.
   totpIssuer: string;
   clients: ClientMetadata[];
+  // Audit log lines: "-" for stdout, "off", or a file path.
+  auditLog: string;
+  // Audit rows older than this are deleted by the hourly cleanup.
+  auditRetentionDays: number;
 }
 
 export function loadConfig(path: string): MamoriConfig {
@@ -24,5 +28,7 @@ export function loadConfig(path: string): MamoriConfig {
     database: raw.database ?? 'mamori.db',
     totpIssuer: raw.totpIssuer ?? new URL(raw.issuer).hostname,
     clients: raw.clients ?? [],
+    auditLog: raw.auditLog ?? '-',
+    auditRetentionDays: raw.auditRetentionDays ?? 400,
   };
 }

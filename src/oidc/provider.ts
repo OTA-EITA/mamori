@@ -1,11 +1,13 @@
+import type { EventEmitter } from 'node:events';
 import type { DatabaseSync } from 'node:sqlite';
 import Provider, { type Configuration } from 'oidc-provider';
 import type { MamoriConfig } from '../config.js';
 import { SqliteAdapter } from '../store/oidcAdapter.js';
 import type { UserStore } from '../store/users.js';
+import type { AuditLog } from '../audit/audit.js';
 import { cookieKeys, signingJwks } from './keys.js';
 
-export function createProvider(config: MamoriConfig, db: DatabaseSync, users: UserStore): Provider {
+export function createProvider(config: MamoriConfig, db: DatabaseSync, users: UserStore, audit?: AuditLog): Provider {
   const configuration: Configuration = {
     adapter: (name: string) => new SqliteAdapter(db, name),
     clients: config.clients,
@@ -35,5 +37,46 @@ export function createProvider(config: MamoriConfig, db: DatabaseSync, users: Us
   const provider = new Provider(config.issuer, configuration);
   // Only believe X-Forwarded-* when the admin says there is a proxy in front.
   provider.proxy = config.trustProxy ?? false;
+  if (audit) logTokenEvents(provider, audit);
   return provider;
+}
+
+interface IssuedToken {
+  accountId?: string;
+  clientId?: string;
+  scope?: string;
+}
+
+interface EventContext {
+  oidc?: { client?: { clientId?: string } };
+}
+
+// Token events for the audit log. Only who, which app and which scopes: an
+// opaque access token's id is the token itself, so it is never written.
+// Stored tokens (opaque access tokens, refresh tokens) emit "<kind>.saved";
+// tokens that are not stored (JWT access tokens) emit "<kind>.issued". Each
+// token emits only one of the two. Not every runtime event is in the type
+// definitions, so the listeners go through EventEmitter.
+function logTokenEvents(provider: Provider, audit: AuditLog): void {
+  const events = provider as unknown as EventEmitter;
+  const issued = (kind: 'access_token' | 'refresh_token') => (token: IssuedToken) => {
+    audit.write({
+      event: 'token.issued',
+      token_type: kind,
+      ...(token.accountId ? { actor: { type: 'user', id: token.accountId } } : {}),
+      ...(token.clientId ? { client_id: token.clientId } : {}),
+      ...(token.scope ? { scope: token.scope } : {}),
+    });
+  };
+  events.on('access_token.saved', issued('access_token'));
+  events.on('access_token.issued', issued('access_token'));
+  events.on('refresh_token.saved', issued('refresh_token'));
+  events.on('grant.revoked', (ctx: EventContext, grantId: string) => {
+    const clientId = ctx.oidc?.client?.clientId;
+    audit.write({ event: 'token.revoked', grant_id: grantId, ...(clientId ? { client_id: clientId } : {}) });
+  });
+  events.on('end_session.success', (ctx: EventContext) => {
+    const clientId = ctx.oidc?.client?.clientId;
+    audit.write({ event: 'sign_out', ...(clientId ? { client_id: clientId } : {}) });
+  });
 }

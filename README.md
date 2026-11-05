@@ -14,6 +14,7 @@ See [docs/design.md](docs/design.md) for the scope and roadmap.
 - Sign-in with email and password, plus TOTP for users who have it set up. The ID token's `amr` says which (`["pwd"]` or `["pwd", "otp"]`).
 - Failed sign-ins are throttled: an IP is refused for an email after 10 failures in 15 minutes, and every failure after the fifth slows down further attempts for that email. The account itself is never locked. Disabled users cannot sign in, and disabling a user signs them out of every app.
 - Passwords are hashed with scrypt. Signing keys and cookie keys are generated on first start and kept in the SQLite file.
+- Audit log: sign-ins, failed attempts, MFA challenges, issued and revoked tokens, sign-outs and admin actions are stored in SQLite and written as one JSON line each (stdout by default, or a file), ready for CloudWatch, Datadog or Loki. Passwords, codes and tokens are never written. Rows older than `auditRetentionDays` (default 400) are deleted.
 
 ## Quick start
 
@@ -29,6 +30,8 @@ npm start
 ```
 
 Put mamori behind a reverse proxy that terminates TLS, and set `"trustProxy": true` so that it uses the `X-Forwarded-*` headers from that proxy. Leave it `false` (the default) when nothing in front of mamori sets them, otherwise clients can choose their own IP address. The discovery document is at `/.well-known/openid-configuration` and a health check at `/healthz`.
+
+The audit log goes to stdout unless `"auditLog"` is set to a file path or `"off"`.
 
 ## Development
 

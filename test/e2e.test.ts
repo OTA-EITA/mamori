@@ -9,6 +9,7 @@ import { openDatabase } from '../src/store/db.js';
 import { UserStore } from '../src/store/users.js';
 import { decodeBase32, generateTotpSecret } from '../src/totp/base32.js';
 import { generateTotp } from '../src/totp/totp.js';
+import { AuditLog, type AuditRecord } from '../src/audit/audit.js';
 
 const REDIRECT_URI = 'http://127.0.0.1:9/callback';
 
@@ -69,10 +70,13 @@ async function startLogin(browser: Browser, config: client.Configuration) {
 }
 
 const sleeps: number[] = [];
+const auditLines: string[] = [];
+const events = (): AuditRecord[] => auditLines.map((l) => JSON.parse(l) as AuditRecord);
 
 beforeAll(async () => {
   const db = openDatabase(':memory:');
   users = new UserStore(db);
+  const audit = new AuditLog(db, { sink: (line) => auditLines.push(line) });
   let handler: ReturnType<typeof createRequestHandler> | undefined;
   server = createServer((req, res) => handler!(req, res));
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -83,13 +87,16 @@ beforeAll(async () => {
       port: 0,
       database: ':memory:',
       totpIssuer: 'mamori-test',
+      auditLog: 'off',
+      auditRetentionDays: 400,
       clients: [{ client_id: 'app', client_secret: 'app-secret', redirect_uris: [REDIRECT_URI], client_name: 'Test App' }],
     },
     db,
     users,
+    audit,
   );
   // No real waiting for the throttling delays in tests; record them instead.
-  handler = createRequestHandler(provider, users, { sleep: async (seconds) => void sleeps.push(seconds) });
+  handler = createRequestHandler(provider, users, { audit, sleep: async (seconds) => void sleeps.push(seconds) });
   await users.create({ email: 'alice@example.com', name: 'Alice', password: 'alice-password-1' });
   const carol = await users.create({ email: 'carol@example.com', name: 'Carol', password: 'carol-password' });
   users.setDisabled(carol.id, true);
@@ -187,6 +194,31 @@ describe('sign-in with authorization code + PKCE', () => {
     // The tenth failure locks this IP out for this email, including the password step.
     const again = await browser.go(formAction(page.body), { method: 'POST', form: { email: 'erin@example.com', password: 'erin-password-1' } });
     expect(again.status).toBe(429);
+  });
+
+  it('writes the sign-in and token events to the audit log, without secrets', async () => {
+    auditLines.length = 0;
+    const config = await discover();
+    const browser = new Browser();
+    const { page, verifier, state } = await startLogin(browser, config);
+    const wrong = await browser.go(formAction(page.body), { method: 'POST', form: { email: 'bob@example.com', password: 'not-the-password' } });
+    const totp = await browser.go(formAction(wrong.body), { method: 'POST', form: { email: 'bob@example.com', password: 'bob-password-12' } });
+    const bad = await browser.go(formAction(totp.body), { method: 'POST', form: { code: '000001' } });
+    // Wait for the next time step so the code is not one already used by another test.
+    const code = generateTotp(decodeBase32(totpSecret)!, Math.floor(Date.now() / 1000) + 30).code;
+    const done = await browser.go(formAction(bad.body), { method: 'POST', form: { code } });
+    await client.authorizationCodeGrant(config, new URL(done.url), { pkceCodeVerifier: verifier, expectedState: state });
+
+    const names = events().map((e) => e.event);
+    expect(names).toEqual(['sign_in.failed', 'mfa.challenge_failed', 'sign_in.succeeded', 'token.issued']);
+    const [failed, challenge, succeeded, token] = events();
+    expect(failed).toMatchObject({ actor: { type: 'user', email: 'bob@example.com' }, client_id: 'app', ip: '127.0.0.1', reason: 'wrong_password' });
+    expect(challenge).toMatchObject({ method: 'otp' });
+    expect(succeeded).toMatchObject({ amr: ['pwd', 'otp'], actor: { email: 'bob@example.com' } });
+    expect(token).toMatchObject({ token_type: 'access_token', client_id: 'app', scope: 'openid email profile' });
+    expect(auditLines.join('\n')).not.toMatch(/not-the-password|bob-password-12|000001/);
+    expect(auditLines.join('\n')).not.toContain(code);
+    expect(users.findByEmail('bob@example.com')!.lastSignInAt).not.toBeNull();
   });
 
   it('refuses an authorization request without PKCE', async () => {

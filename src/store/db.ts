@@ -42,6 +42,20 @@ const MIGRATIONS: string[] = [
   ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE users ADD COLUMN last_sign_in_at TEXT;
   `,
+  // 2: the audit log. The full event is kept as JSON; the columns are for filtering.
+  `
+  CREATE TABLE audit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    time TEXT NOT NULL,
+    event TEXT NOT NULL,
+    actor_id TEXT,
+    actor_email TEXT,
+    data TEXT NOT NULL
+  );
+  CREATE INDEX audit_events_time ON audit_events (time);
+  CREATE INDEX audit_events_event ON audit_events (event, time);
+  CREATE INDEX audit_events_actor ON audit_events (actor_id, time);
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
