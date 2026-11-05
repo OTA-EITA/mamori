@@ -14,6 +14,7 @@ import { GroupStore } from '../src/store/groups.js';
 import { consoleHandler } from '../src/console/console.js';
 import { RecoveryCodes } from '../src/console/recovery.js';
 import { ConsoleSessions } from '../src/console/sessions.js';
+import { SetupLinks } from '../src/console/setupLinks.js';
 import { PasskeyStore } from '../src/store/passkeys.js';
 import { WebAuthn } from '../src/passkeys/webauthn.js';
 import { SoftAuthenticator } from './authenticator.js';
@@ -29,6 +30,7 @@ let issuer: string;
 let users: UserStore;
 const totpSecret = generateTotpSecret();
 const ginaSecret = generateTotpSecret();
+const jackSecret = generateTotpSecret();
 
 // A tiny browser: keeps cookies and follows redirects until it reaches a page
 // or the client's redirect_uri.
@@ -118,7 +120,7 @@ beforeAll(async () => {
   const now = () => Math.floor(Date.now() / 1000);
   const passkeys = new PasskeyStore(db);
   const webauthn = new WebAuthn(issuer, 'mamori-test');
-  const account = consoleHandler({ provider, users, sessions: new ConsoleSessions(db, testBox, now), recovery, audit, passkeys, webauthn, issuer, totpIssuer: 'mamori-test' });
+  const account = consoleHandler({ provider, users, sessions: new ConsoleSessions(db, testBox, now), recovery, audit, passkeys, webauthn, groups, setupLinks: new SetupLinks(db, now), issuer, totpIssuer: 'mamori-test' });
   handler = createRequestHandler(provider, users, { audit, recovery, console: account, mfaPolicy: () => mfaPolicy, totpIssuer: 'mamori-test', passkeys, webauthn, sleep: async (seconds) => void sleeps.push(seconds) });
   const alice = await users.create({ email: 'alice@example.com', name: 'Alice', password: 'alice-password-1' });
   for (const name of ['engineering', 'all-staff']) groups.addMember(groups.create(name).id, alice.id);
@@ -130,6 +132,14 @@ beforeAll(async () => {
   await users.create({ email: 'frank@example.com', name: 'Frank', password: 'frank-password-1' });
   await users.create({ email: 'hana@example.com', name: 'Hana', password: 'hana-password-1' });
   await users.create({ email: 'ivy@example.com', name: 'Ivy', password: 'ivy-password-12' });
+  const jack = await users.create({ email: 'jack@example.com', name: 'Jack', password: 'jack-password-1' });
+  users.setAdmin(jack.id, true);
+  users.setTotpSecret(jack.id, jackSecret);
+  const leo = await users.create({ email: 'leo@example.com', name: 'Leo', password: 'leo-password-12' });
+  users.setAdmin(leo.id, true);
+  await users.create({ email: 'kate@example.com', name: 'Kate', password: 'kate-password-1' });
+  const mia = await users.create({ email: 'mia@example.com', name: 'Mia', password: 'mia-password-12' });
+  users.setTotpSecret(mia.id, generateTotpSecret());
   const gina = await users.create({ email: 'gina@example.com', name: 'Gina', password: 'gina-password-1' });
   users.setTotpSecret(gina.id, ginaSecret);
   const erin = await users.create({ email: 'erin@example.com', name: 'Erin', password: 'erin-password-1' });
@@ -470,5 +480,86 @@ describe('passkeys', () => {
     stranger.userHandle = 'nobody';
     const result = await passkeySignIn(app, page.body, stranger);
     expect(result.status).toBe(400);
+  });
+});
+
+describe('admin console', () => {
+  const at = (path: string) => new URL(path, issuer).toString();
+
+  async function signInToAdmin(email: string, password: string, secret?: string) {
+    const browser = new Browser();
+    const login = await browser.go(at('/admin/users'));
+    let page = await browser.go(formAction(login.body), { method: 'POST', form: { email, password } });
+    if (secret) {
+      const code = generateTotp(decodeBase32(secret)!, Math.floor(Date.now() / 1000)).code;
+      page = await browser.go(formAction(page.body), { method: 'POST', form: { code } });
+    }
+    return { browser, page };
+  }
+
+  it('refuses people who are not admins', async () => {
+    const { page } = await signInToAdmin('alice@example.com', 'alice-password-1');
+    expect(page.status).toBe(403);
+    expect(page.body).toContain('not an administrator');
+  });
+
+  it('refuses an admin who signed in without a second factor', async () => {
+    const { page } = await signInToAdmin('leo@example.com', 'leo-password-12');
+    expect(page.status).toBe(403);
+    expect(page.body).toContain('two-step verification');
+  });
+
+  it('lets an admin find, disable, enable and reset other users', async () => {
+    const { browser, page } = await signInToAdmin('jack@example.com', 'jack-password-1', jackSecret);
+    // Comes back to the page that was asked for.
+    expect(page.url).toBe(at('/admin/users'));
+    expect(page.body).toContain('kate@example.com');
+    const found = await browser.go(at('/admin/users?q=kat'));
+    expect(found.body).toContain('kate@example.com');
+    expect(found.body).not.toContain('alice@example.com');
+
+    const kate = users.findByEmail('kate@example.com')!;
+    const detail = await browser.go(at(`/admin/users/${kate.id}`));
+    const csrf = hidden(detail.body, 'csrf');
+    expect((await browser.go(at(`/admin/users/${kate.id}/disable`), { method: 'POST', form: {} })).status).toBe(403);
+    await browser.go(at(`/admin/users/${kate.id}/disable`), { method: 'POST', form: { csrf } });
+    expect(users.findByEmail('kate@example.com')!.disabled).toBe(true);
+    const app = new Browser();
+    const { page: appLogin } = await startLogin(app, await discover());
+    expect((await app.go(formAction(appLogin.body), { method: 'POST', form: { email: 'kate@example.com', password: 'kate-password-1' } })).status).toBe(401);
+    await browser.go(at(`/admin/users/${kate.id}/enable`), { method: 'POST', form: { csrf } });
+    expect(users.findByEmail('kate@example.com')!.disabled).toBe(false);
+
+    const mia = users.findByEmail('mia@example.com')!;
+    await browser.go(at(`/admin/users/${mia.id}/reset-mfa`), { method: 'POST', form: { csrf } });
+    expect(users.findByEmail('mia@example.com')!.totpSecret).toBeNull();
+
+    const jack = users.findByEmail('jack@example.com')!;
+    const self = await browser.go(at(`/admin/users/${jack.id}/revoke-admin`), { method: 'POST', form: { csrf } });
+    expect(self.status).toBe(400);
+    expect(users.findByEmail('jack@example.com')!.isAdmin).toBe(true);
+
+    // Adding a user makes a setup link; the person chooses a password with it, once.
+    const form = await browser.go(at('/admin/users/new'));
+    const added = await browser.go(at('/admin/users/new'), { method: 'POST', form: { csrf: hidden(form.body, 'csrf'), email: 'nina@example.com', name: 'Nina' } });
+    const link = /<code>(http[^<]+)<\/code>/.exec(added.body)![1]!;
+    const person = new Browser();
+    const choose = await person.go(link);
+    expect(choose.body).toContain('Choose a password');
+    expect((await person.go(link, { method: 'POST', form: { password: 'nina-password-1', confirm: 'something-else' } })).status).toBe(400);
+    const saved = await person.go(link, { method: 'POST', form: { password: 'nina-password-1', confirm: 'nina-password-1' } });
+    expect(saved.body).toContain('Sign in');
+    const signedIn = await person.go(formAction(saved.body), { method: 'POST', form: { email: 'nina@example.com', password: 'nina-password-1' } });
+    expect(signedIn.url).toBe(at('/account'));
+    expect((await new Browser().go(link)).status).toBe(410);
+
+    // A new link for a forgotten password signs the person out everywhere.
+    const nina = users.findByEmail('nina@example.com')!;
+    await browser.go(at(`/admin/users/${nina.id}/setup-link`), { method: 'POST', form: { csrf } });
+    expect((await person.go(at('/account'))).body).toContain('Sign in');
+
+    const actions = events().filter((e) => e.actor?.type === 'admin').map((e) => e.event);
+    expect(actions).toEqual(expect.arrayContaining(['user.disabled', 'user.enabled', 'user.mfa_reset', 'user.created', 'setup_link.created']));
+    expect(events().some((e) => e.event === 'setup_link.used')).toBe(true);
   });
 });

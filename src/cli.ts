@@ -10,6 +10,8 @@ import { buildOtpauthUri, generateTotpSecret } from './totp/base32.js';
 const USAGE = `usage:
   mamori-admin user add <email> <name>      (reads the password from stdin)
   mamori-admin user disable <email>
+  mamori-admin user enable <email>
+  mamori-admin user make-admin <email>      (admin pages also need a second factor)
   mamori-admin totp enroll <email>          (prints an otpauth:// URI to scan)
   mamori-admin totp remove <email>
   mamori-admin group add <name> [description]
@@ -58,6 +60,18 @@ async function main(argv: string[]): Promise<number> {
     users.setDisabled(user.id, true);
     audit.write({ event: 'user.disabled', actor: cli, user_id: user.id, user_email: user.email });
     console.log(`disabled ${user.email}`);
+    return 0;
+  }
+  if (group === 'user' && command === 'enable') {
+    users.setDisabled(user.id, false);
+    audit.write({ event: 'user.enabled', actor: cli, user_id: user.id, user_email: user.email });
+    console.log(`enabled ${user.email}`);
+    return 0;
+  }
+  if (group === 'user' && command === 'make-admin') {
+    users.setAdmin(user.id, true);
+    audit.write({ event: 'admin.granted', actor: cli, user_id: user.id, user_email: user.email });
+    console.log(`${user.email} is an admin; sign in at /admin with a second factor`);
     return 0;
   }
   if (group === 'totp' && command === 'enroll') {

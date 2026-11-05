@@ -10,6 +10,7 @@ import { GroupStore } from './store/groups.js';
 import { consoleHandler } from './console/console.js';
 import { RecoveryCodes } from './console/recovery.js';
 import { ConsoleSessions } from './console/sessions.js';
+import { SetupLinks } from './console/setupLinks.js';
 import { PasskeyStore } from './store/passkeys.js';
 import { WebAuthn } from './passkeys/webauthn.js';
 
@@ -20,7 +21,8 @@ const users = new UserStore(db, box);
 const sealed = users.sealPlaintextSecrets();
 if (sealed > 0) console.log(`sealed ${sealed} TOTP secret(s) stored as plain text by an older version`);
 const audit = new AuditLog(db, { output: config.auditLog });
-const provider = createProvider(config, db, users, audit, new GroupStore(db));
+const groups = new GroupStore(db);
+const provider = createProvider(config, db, users, audit, groups);
 
 const now = () => Math.floor(Date.now() / 1000);
 const sessions = new ConsoleSessions(db, box, now);
@@ -31,7 +33,7 @@ const mfa = resolveMfaPolicy(config, createdBy);
 if (mfa.warning) console.warn(mfa.warning);
 const passkeys = new PasskeyStore(db);
 const webauthn = new WebAuthn(config.issuer, config.totpIssuer);
-const account = consoleHandler({ provider, users, sessions, recovery, audit, trustProxy, passkeys, webauthn, issuer: config.issuer, totpIssuer: config.totpIssuer });
+const account = consoleHandler({ provider, users, sessions, recovery, audit, trustProxy, passkeys, webauthn, groups, setupLinks: new SetupLinks(db, now), issuer: config.issuer, totpIssuer: config.totpIssuer });
 
 setInterval(() => {
   deleteExpired(db);

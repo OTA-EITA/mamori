@@ -13,7 +13,12 @@ import { errorPage } from '../oidc/pages.js';
 import type { UserStore } from '../store/users.js';
 import { buildOtpauthUri, decodeBase32, generateTotpSecret } from '../totp/base32.js';
 import { verifyTotp } from '../totp/totp.js';
-import { accountPage, recoveryCodesPage, signedOutPage, totpSetupPage } from './pages.js';
+import { accountPage, recoveryCodesPage, setupLinkInvalidPage, setupPage, signedOutPage, totpSetupPage } from './pages.js';
+import type { SetupLinks } from './setupLinks.js';
+import { adminDeniedPage, adminNewUserPage, adminSetupLinkPage, adminUserPage, adminUsersPage, type UserRowView } from './adminPages.js';
+import { randomBytes as randomPassword } from 'node:crypto';
+import type { GroupStore } from '../store/groups.js';
+import type { User } from '../store/users.js';
 import type { RecoveryCodes } from './recovery.js';
 import type { ConsoleSessions } from './sessions.js';
 
@@ -53,6 +58,8 @@ export interface ConsoleDeps {
   now?: () => number;
   passkeys?: PasskeyStore;
   webauthn?: WebAuthn;
+  groups?: GroupStore;
+  setupLinks?: SetupLinks;
 }
 
 const pkceChallenge = (verifier: string) => createHash('sha256').update(verifier).digest('base64url');
@@ -69,13 +76,13 @@ export function consoleHandler(deps: ConsoleDeps) {
   const redirectUri = new URL(CALLBACK_PATH, deps.issuer).toString();
   // Logins started from this browser that have not come back yet, by state.
   // In memory, like the sign-in throttling (one instance for now).
-  const pendingLogins = new Map<string, { verifier: string; expires: number }>();
+  const pendingLogins = new Map<string, { verifier: string; expires: number; returnTo: string }>();
 
-  function startLogin(res: ServerResponse): void {
+  function startLogin(res: ServerResponse, returnTo = '/account'): void {
     for (const [k, v] of pendingLogins) if (v.expires <= now()) pendingLogins.delete(k);
     const state = randomBytes(24).toString('base64url');
     const verifier = randomBytes(32).toString('base64url');
-    pendingLogins.set(state, { verifier, expires: now() + LOGIN_TTL_SECONDS });
+    pendingLogins.set(state, { verifier, expires: now() + LOGIN_TTL_SECONDS, returnTo });
     const url = new URL('/auth', deps.issuer);
     url.search = new URLSearchParams({
       client_id: CONSOLE_CLIENT_ID,
@@ -115,9 +122,124 @@ export function consoleHandler(deps: ConsoleDeps) {
     const user = code.accountId ? deps.users.findById(code.accountId) : undefined;
     if (!user || user.disabled) return fail();
     const id = deps.sessions.create(user.id, code.amr ?? []);
-    redirect(res, '/account', {
+    redirect(res, pending.returnTo, {
       'set-cookie': [cookie(SESSION_COOKIE, id, { secure }), cookie(STATE_COOKIE, '', { secure, maxAge: 0 })],
     });
+  }
+
+  const rowView = (u: User): UserRowView => ({
+    id: u.id,
+    email: u.email,
+    name: u.name,
+    disabled: u.disabled,
+    isAdmin: u.isAdmin,
+    hasTotp: u.totpSecret !== null,
+    passkeys: deps.passkeys?.listByUser(u.id).length ?? 0,
+    lastSignInAt: u.lastSignInAt,
+  });
+
+  // Admin pages (docs/v0.2.md, "Admin console"). They need an admin account
+  // and a sign-in that used a second factor.
+  async function admin(req: IncomingMessage, res: ServerResponse, url: URL, me: User, session: { amr: string[]; csrf: string }, ip: string): Promise<void> {
+    const path = url.pathname;
+    if (!me.isAdmin) return send(res, 403, adminDeniedPage('not_admin', session.csrf));
+    if (!session.amr.includes('mfa')) return send(res, 403, adminDeniedPage('needs_mfa', session.csrf));
+    const actor = { type: 'admin' as const, id: me.id, email: me.email };
+    const log = (event: string, target: User, extra: Record<string, unknown> = {}) =>
+      deps.audit?.write({ event, actor, client_id: CONSOLE_CLIENT_ID, ip, user_id: target.id, user_email: target.email, ...extra });
+    const userPage = (status: number, target: User, extra: { notice?: string; error?: string } = {}) =>
+      send(
+        res,
+        status,
+        adminUserPage({
+          user: rowView(target),
+          self: target.id === me.id,
+          groups: deps.groups?.namesOf(target.id) ?? [],
+          passkeys: (deps.passkeys?.listByUser(target.id) ?? []).map((p) => ({ name: p.name, createdAt: p.createdAt, lastUsedAt: p.lastUsedAt })),
+          events: deps.audit?.list({ actorId: target.id, limit: 20 }) ?? [],
+          csrf: session.csrf,
+          ...extra,
+        }),
+      );
+
+    if (req.method === 'GET' && (path === '/admin' || path === '/admin/')) return redirect(res, '/admin/users');
+    const linkFor = (target: User, created: boolean) => {
+      const token = deps.setupLinks!.create(target.id);
+      log('setup_link.created', target);
+      return send(res, 200, adminSetupLinkPage({ email: target.email, userId: target.id, created, link: new URL(`/setup/${token}`, deps.issuer).toString() }));
+    };
+    if (path === '/admin/users/new' && deps.setupLinks) {
+      if (req.method === 'GET') return send(res, 200, adminNewUserPage({ csrf: session.csrf }));
+      const form = await readForm(req);
+      if (!sameString(form.get('csrf') ?? '', session.csrf)) return send(res, 403, errorPage('This form has expired. Reload the page.'));
+      const email = (form.get('email') ?? '').trim().toLowerCase();
+      const name = (form.get('name') ?? '').trim();
+      if (!/^[^\s@]+@[^\s@]+$/.test(email) || !name) return send(res, 400, adminNewUserPage({ csrf: session.csrf, email, name, error: 'Enter an email address and a name.' }));
+      if (deps.users.findByEmail(email)) return send(res, 409, adminNewUserPage({ csrf: session.csrf, email, name, error: 'A user with this email already exists.' }));
+      // A random password nobody knows, until the person chooses one with the link.
+      const created = await deps.users.create({ email, name, password: randomPassword(32).toString('base64url') });
+      log('user.created', created);
+      return linkFor(created, true);
+    }
+    if (req.method === 'GET' && path === '/admin/users') {
+      const query = url.searchParams.get('q') ?? '';
+      return send(res, 200, adminUsersPage({ users: deps.users.list(query).map(rowView), query, csrf: session.csrf }));
+    }
+    const m = /^\/admin\/users\/([\w-]+)(?:\/(disable|enable|reset-mfa|grant-admin|revoke-admin|setup-link))?$/.exec(path);
+    const target = m ? deps.users.findById(m[1]!) : undefined;
+    if (!m || !target) return send(res, 404, errorPage('Not found.'));
+    if (req.method === 'GET' && !m[2]) return userPage(200, target);
+    if (req.method !== 'POST' || !m[2]) return send(res, 404, errorPage('Not found.'));
+
+    const form = await readForm(req);
+    if (!sameString(form.get('csrf') ?? '', session.csrf)) return send(res, 403, errorPage('This form has expired. Reload the page.'));
+    // Admins change their own account on the account page, so they cannot lock
+    // themselves out from here.
+    if (target.id === me.id) return userPage(400, target, { error: 'Use your account page to change your own account.' });
+
+    switch (m[2]) {
+      case 'disable':
+        deps.users.setDisabled(target.id, true);
+        log('user.disabled', target);
+        return userPage(200, deps.users.findById(target.id)!, { notice: 'Disabled and signed out of every app.' });
+      case 'enable':
+        deps.users.setDisabled(target.id, false);
+        log('user.enabled', target);
+        return userPage(200, deps.users.findById(target.id)!, { notice: 'Enabled.' });
+      case 'reset-mfa':
+        deps.users.resetSecondFactors(target.id);
+        log('user.mfa_reset', target);
+        return userPage(200, deps.users.findById(target.id)!, { notice: 'Second factors removed. The user was signed out and sets them up again at the next sign-in.' });
+      case 'setup-link':
+        if (!deps.setupLinks) return send(res, 404, errorPage('Not found.'));
+        // A new link is for a forgotten password, so sign the user out everywhere.
+        deps.users.signOutEverywhere(target.id);
+        return linkFor(target, false);
+      case 'grant-admin':
+        deps.users.setAdmin(target.id, true);
+        log('admin.granted', target);
+        return userPage(200, deps.users.findById(target.id)!, { notice: 'Now an administrator.' });
+      default:
+        deps.users.setAdmin(target.id, false);
+        log('admin.revoked', target);
+        return userPage(200, deps.users.findById(target.id)!, { notice: 'No longer an administrator.' });
+    }
+  }
+
+  async function setupLink(req: IncomingMessage, res: ServerResponse, token: string): Promise<void> {
+    const userId = deps.setupLinks!.check(token);
+    const user = userId ? deps.users.findById(userId) : undefined;
+    if (!user || user.disabled) return send(res, 410, setupLinkInvalidPage());
+    if (req.method !== 'POST') return send(res, 200, setupPage({ email: user.email }));
+    const form = await readForm(req);
+    const password = form.get('password') ?? '';
+    if (password.length < 12) return send(res, 400, setupPage({ email: user.email, error: 'Use 12 characters or more.' }));
+    if (password !== form.get('confirm')) return send(res, 400, setupPage({ email: user.email, error: 'The two passwords are different.' }));
+    if (!deps.setupLinks!.use(token)) return send(res, 410, setupLinkInvalidPage());
+    await deps.users.setPassword(user.id, password);
+    deps.audit?.write({ event: 'setup_link.used', actor: { type: 'user', id: user.id, email: user.email }, ip: clientIp(req, deps.trustProxy ?? false) });
+    // Signing in next goes through the MFA setup step when the policy requires it.
+    return redirect(res, '/account');
   }
 
   return async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -125,12 +247,16 @@ export function consoleHandler(deps: ConsoleDeps) {
     const path = url.pathname;
     if (req.method === 'GET' && path === CALLBACK_PATH) return callback(req, res, url);
     if (req.method === 'GET' && path === SIGNED_OUT_PATH) return send(res, 200, signedOutPage());
+    const setup = /^\/setup\/([\w-]{20,})$/.exec(path);
+    if (setup && deps.setupLinks) return setupLink(req, res, setup[1]!);
 
     const sessionId = readCookie(req, SESSION_COOKIE);
     const session = deps.sessions.get(sessionId);
     const user = session ? deps.users.findById(session.userId) : undefined;
     if (!session || !sessionId || !user || user.disabled) {
+      // Come back to the page that was asked for, but only pages of the console.
       if (req.method === 'GET' && path === '/account') return startLogin(res);
+      if (req.method === 'GET' && (path === '/admin' || /^\/admin\/[\w/-]*$/.test(path))) return startLogin(res, path);
       return redirect(res, '/account');
     }
     const ip = clientIp(req, deps.trustProxy ?? false);
@@ -146,6 +272,8 @@ export function consoleHandler(deps: ConsoleDeps) {
       ...extra,
     });
     const page = (status: number, html: string) => send(res, status, html, { 'content-security-policy': SCRIPT_CSP });
+
+    if (path === '/admin' || path.startsWith('/admin/')) return admin(req, res, url, user, session, ip);
 
     if (req.method === 'GET' && path === '/account') return page(200, accountPage(view()));
     if (req.method !== 'POST') return send(res, 404, errorPage('Not found.'));

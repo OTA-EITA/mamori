@@ -92,12 +92,57 @@ export class UserStore {
     this.db.prepare('UPDATE users SET totp_secret = ?, totp_last_counter = NULL WHERE id = ?').run(secret === null ? null : this.box.seal(secret), id);
   }
 
+  async setPassword(id: string, password: string): Promise<void> {
+    this.db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(await hashPassword(password), id);
+  }
+
   setLastSignIn(id: string, at: Date): void {
     this.db.prepare('UPDATE users SET last_sign_in_at = ? WHERE id = ?').run(at.toISOString(), id);
   }
 
   setTotpLastCounter(id: string, counter: number): void {
     this.db.prepare('UPDATE users SET totp_last_counter = ? WHERE id = ?').run(counter, id);
+  }
+
+  // For the admin console. `query` matches the email or the name.
+  list(query = ''): User[] {
+    const like = `%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    const rows = this.db
+      .prepare("SELECT * FROM users WHERE email LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' ORDER BY email LIMIT 500")
+      .all(like, like) as unknown as UserRow[];
+    return rows.map((r) => toUser(r, this.box));
+  }
+
+  countAdmins(): number {
+    return Number((this.db.prepare('SELECT COUNT(*) AS n FROM users WHERE is_admin = 1 AND disabled = 0').get() as { n: number }).n);
+  }
+
+  setAdmin(id: string, isAdmin: boolean): void {
+    this.db.prepare('UPDATE users SET is_admin = ? WHERE id = ?').run(isAdmin ? 1 : 0, id);
+  }
+
+  // Removes TOTP, passkeys and recovery codes and signs the user out
+  // everywhere. With the MFA policy "required", the next sign-in goes through
+  // the setup step again.
+  resetSecondFactors(id: string): void {
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('UPDATE users SET totp_secret = NULL, totp_last_counter = NULL WHERE id = ?').run(id);
+      this.db.prepare('DELETE FROM passkeys WHERE user_id = ?').run(id);
+      this.db.prepare('DELETE FROM recovery_codes WHERE user_id = ?').run(id);
+      this.db.prepare('DELETE FROM console_sessions WHERE user_id = ?').run(id);
+      revokeAccount(this.db, id);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  // Ends every app session and console session of the user.
+  signOutEverywhere(id: string): void {
+    revokeAccount(this.db, id);
+    this.db.prepare('DELETE FROM console_sessions WHERE user_id = ?').run(id);
   }
 
   // Disabling also signs the user out of every app, not only future sign-ins.

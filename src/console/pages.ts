@@ -121,3 +121,22 @@ export function logoutConfirmPage(form: string): string {
   // to be submitted; the button submits it.
   return page('Sign out', `<h1>Sign out</h1><p>Sign out of every app that uses this sign-in?</p>${form}<button type="submit" form="op.logoutForm" name="logout" value="yes">Sign out</button>`);
 }
+
+export function setupPage(v: { email: string; error?: string }): string {
+  return page(
+    'Choose a password',
+    `<h1>Choose a password</h1>
+<p>${escape(v.email)}</p>
+${v.error ? `<p class="error">${escape(v.error)}</p>` : ''}
+<form method="post">
+  <input type="hidden" name="username" autocomplete="username" value="${escape(v.email)}">
+  <label>New password (12 characters or more)<input type="password" name="password" autocomplete="new-password" minlength="12" required autofocus></label>
+  <label>Type it again<input type="password" name="confirm" autocomplete="new-password" minlength="12" required></label>
+  <button type="submit">Save and sign in</button>
+</form>`,
+  );
+}
+
+export function setupLinkInvalidPage(): string {
+  return page('Link not valid', '<h1>This link does not work</h1><p>It was already used or is more than 24 hours old. Ask your administrator for a new one.</p>');
+}

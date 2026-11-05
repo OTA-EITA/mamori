@@ -107,6 +107,16 @@ const MIGRATIONS: string[] = [
   CREATE INDEX passkeys_user ON passkeys (user_id);
   ALTER TABLE console_sessions ADD COLUMN pending_challenge TEXT;
   `,
+  // 6: setup links, for people an admin created and for forgotten passwords.
+  `
+  CREATE TABLE setup_links (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER
+  );
+  CREATE INDEX setup_links_user ON setup_links (user_id);
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

@@ -26,7 +26,7 @@ export function createRequestHandler(provider: Provider, users: UserStore, opts:
       res.writeHead(200, { 'content-type': 'text/plain' }).end('ok');
       return;
     }
-    if (opts.console && (path === '/account' || path.startsWith('/account/') || path === CALLBACK_PATH)) {
+    if (opts.console && (path === '/account' || path.startsWith('/account/') || path === '/admin' || path.startsWith('/admin/') || path.startsWith('/setup/') || path === CALLBACK_PATH)) {
       opts.console(req, res).catch(() => {
         if (!res.headersSent) res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
         res.end(errorPage('Something went wrong. Open your account page again.'));
