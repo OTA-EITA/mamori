@@ -27,3 +27,7 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    # Stay on the Node.js LTS line; moving to the next LTS is done by hand.
+    ignore:
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
