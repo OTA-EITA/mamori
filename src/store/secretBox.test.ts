@@ -20,8 +20,13 @@ describe('SecretBox', () => {
   it('refuses a changed value and a value sealed with another key', () => {
     const box = new SecretBox(randomBytes(32));
     const sealed = box.seal('JBSWY3DPEHPK3PXP');
-    const flipped = sealed.slice(0, -2) + (sealed.endsWith('A') ? 'B' : 'A') + sealed.slice(-1);
-    expect(() => box.open(flipped)).toThrow();
+    // Flip one bit of the ciphertext, of the IV and of the tag in turn.
+    const raw = Buffer.from(sealed.slice(3), 'base64url');
+    for (const at of [0, 12, raw.length - 1]) {
+      const changed = Buffer.from(raw);
+      changed[at]! ^= 0x01;
+      expect(() => box.open(`v1:${changed.toString('base64url')}`)).toThrow();
+    }
     expect(() => new SecretBox(randomBytes(32)).open(sealed)).toThrow();
   });
 
