@@ -13,8 +13,9 @@ export const DEFAULT_TOTP_OPTIONS: TotpOptions = { algorithm: 'SHA1', digits: 6,
 
 const HMAC_NAMES: Record<TotpAlgorithm, string> = { SHA1: 'sha1', SHA256: 'sha256', SHA512: 'sha512' };
 
-// The counter exceeds 2^31 for timestamps after 2038 at 30-second steps
-// (one of the RFC test vectors), so it has to be written as a 64-bit value.
+// HOTP counters are 8 bytes (RFC 4226 section 5.2). At 30-second steps the
+// counter stays below 2^31 until the year 4011, so the year 2038 limit is about
+// the Unix time, not the counter: keep the time out of 32-bit math (no `t | 0`).
 function counterBytes(counter: number): Uint8Array {
   const view = new DataView(new ArrayBuffer(8));
   view.setBigUint64(0, BigInt(counter), false);
