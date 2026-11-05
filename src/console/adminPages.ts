@@ -152,3 +152,64 @@ export function adminSetupLinkPage(v: { email: string; link: string; userId: str
 <p><a href="/admin/users/${escape(v.userId)}">Back to the user</a></p>`,
   );
 }
+
+export function adminGroupsPage(v: { groups: { name: string; description: string; members: number }[]; csrf: string; notice?: string; error?: string }): string {
+  const rows = v.groups
+    .map((g) => `<tr><td><a href="/admin/groups/${encodeURIComponent(g.name)}">${escape(g.name)}</a></td><td>${escape(g.description)}</td><td>${g.members}</td></tr>`)
+    .join('');
+  return page(
+    'Groups',
+    `<h1>Groups</h1>
+${messages(v)}
+<p class="muted">Apps that ask for the <code>groups</code> scope see these names in the <code>groups</code> claim, so choose names you will not need to change.</p>
+<table><thead><tr><th>Name</th><th>Description</th><th>Members</th></tr></thead><tbody>${rows || '<tr><td colspan="3" class="muted">No groups yet.</td></tr>'}</tbody></table>
+<h2>Add a group</h2>
+<form method="post" action="/admin/groups">${csrfField(v.csrf)}
+  <input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" placeholder="engineering">
+  <input name="description" placeholder="Description (optional)">
+  <button type="submit">Add</button>
+</form>`,
+  );
+}
+
+export function adminGroupPage(v: { name: string; description: string; members: { id: string; email: string; name: string }[]; csrf: string; notice?: string; error?: string }): string {
+  const base = `/admin/groups/${encodeURIComponent(v.name)}`;
+  const rows = v.members
+    .map(
+      (m) => `<tr><td><a href="/admin/users/${escape(m.id)}">${escape(m.email)}</a></td><td>${escape(m.name)}</td>
+<td><form class="inline" method="post" action="${base}/remove">${csrfField(v.csrf)}<input type="hidden" name="email" value="${escape(m.email)}"><button type="submit">Remove</button></form></td></tr>`,
+    )
+    .join('');
+  return page(
+    v.name,
+    `<h1>${escape(v.name)}</h1>
+<p class="muted">${escape(v.description)}</p>
+${messages(v)}
+<table><thead><tr><th>Member</th><th>Name</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="3" class="muted">No members.</td></tr>'}</tbody></table>
+<h2>Add a member</h2>
+<form method="post" action="${base}/add">${csrfField(v.csrf)}<input type="email" name="email" required placeholder="someone@example.co.jp"> <button type="submit">Add</button></form>
+<p><a href="/admin/groups">All groups</a></p>`,
+  );
+}
+
+export function adminAuditPage(v: { events: AuditRecord[]; filter: { event: string; user: string; since: string; until: string } }): string {
+  const f = v.filter;
+  const who = (e: AuditRecord) => escape(e.actor?.email ?? (e.actor?.type === 'cli' ? 'CLI' : (e.actor?.id ?? '')));
+  const rows = v.events
+    .map(
+      (e) => `<tr><td>${day(e.time)}</td><td><code>${escape(e.event)}</code></td><td>${who(e)}</td><td>${escape(String(e.user_email ?? ''))}</td><td>${escape(String(e.reason ?? e.method ?? ''))}</td><td>${escape(String(e.ip ?? ''))}</td><td>${escape(String(e.client_id ?? ''))}</td></tr>`,
+    )
+    .join('');
+  return page(
+    'Audit log',
+    `<h1>Audit log</h1>
+<form method="get" action="/admin/audit">
+  <input name="event" value="${escape(f.event)}" placeholder="Event, e.g. sign_in.failed">
+  <input name="user" value="${escape(f.user)}" placeholder="Email">
+  <input type="date" name="since" value="${escape(f.since)}"> to <input type="date" name="until" value="${escape(f.until)}">
+  <button type="submit">Filter</button>
+</form>
+<p class="muted">Newest first, up to 200 events. Times are UTC. The same events go to the audit log output as JSON lines.</p>
+<table><thead><tr><th>Time</th><th>Event</th><th>Who</th><th>About</th><th>Detail</th><th>IP</th><th>App</th></tr></thead><tbody>${rows || '<tr><td colspan="7" class="muted">No events.</td></tr>'}</tbody></table>`,
+  );
+}

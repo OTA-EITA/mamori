@@ -563,3 +563,37 @@ describe('admin console', () => {
     expect(events().some((e) => e.event === 'setup_link.used')).toBe(true);
   });
 });
+
+describe('admin console: groups and audit log', () => {
+  const at = (path: string) => new URL(path, issuer).toString();
+
+  it('lets an admin add a group, add and remove members, and read the audit log', async () => {
+    const browser = new Browser();
+    const login = await browser.go(at('/admin/groups'));
+    const ask = await browser.go(formAction(login.body), { method: 'POST', form: { email: 'jack@example.com', password: 'jack-password-1' } });
+    const code = generateTotp(decodeBase32(jackSecret)!, Math.floor(Date.now() / 1000) + 30).code;
+    const list = await browser.go(formAction(ask.body), { method: 'POST', form: { code } });
+    expect(list.url).toBe(at('/admin/groups'));
+    const csrf = hidden(list.body, 'csrf');
+
+    expect((await browser.go(at('/admin/groups'), { method: 'POST', form: { csrf, name: 'has space' } })).status).toBe(400);
+    await browser.go(at('/admin/groups'), { method: 'POST', form: { csrf, name: 'design', description: 'Designers' } });
+    expect((await browser.go(at('/admin/groups'), { method: 'POST', form: { csrf, name: 'design' } })).status).toBe(409);
+    await browser.go(at('/admin/groups/design/add'), { method: 'POST', form: { csrf, email: 'kate@example.com' } });
+    const kate = users.findByEmail('kate@example.com')!;
+    expect((await browser.go(at('/admin/groups/design'))).body).toContain('kate@example.com');
+    expect((await browser.go(at('/admin/groups/design/add'), { method: 'POST', form: { csrf, email: 'nobody@example.com' } })).status).toBe(404);
+    await browser.go(at('/admin/groups/design/remove'), { method: 'POST', form: { csrf, email: 'kate@example.com' } });
+    expect((await browser.go(at('/admin/groups/design'))).body).not.toContain('kate@example.com');
+    expect(kate).toBeDefined();
+
+    const audit = await browser.go(at('/admin/audit?event=group.member_added'));
+    expect(audit.body).toContain('group.member_added');
+    expect(audit.body).toContain('kate@example.com');
+    expect(audit.body).not.toContain('group.member_removed');
+    const byUser = await browser.go(at('/admin/audit?user=JACK@example.com'));
+    expect(byUser.body).toContain('group.created');
+    const future = await browser.go(at('/admin/audit?since=2099-01-01'));
+    expect(future.body).toContain('No events.');
+  });
+});

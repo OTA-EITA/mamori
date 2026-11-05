@@ -15,7 +15,7 @@ import { buildOtpauthUri, decodeBase32, generateTotpSecret } from '../totp/base3
 import { verifyTotp } from '../totp/totp.js';
 import { accountPage, recoveryCodesPage, setupLinkInvalidPage, setupPage, signedOutPage, totpSetupPage } from './pages.js';
 import type { SetupLinks } from './setupLinks.js';
-import { adminDeniedPage, adminNewUserPage, adminSetupLinkPage, adminUserPage, adminUsersPage, type UserRowView } from './adminPages.js';
+import { adminAuditPage, adminDeniedPage, adminGroupPage, adminGroupsPage, adminNewUserPage, adminSetupLinkPage, adminUserPage, adminUsersPage, type UserRowView } from './adminPages.js';
 import { randomBytes as randomPassword } from 'node:crypto';
 import type { GroupStore } from '../store/groups.js';
 import type { User } from '../store/users.js';
@@ -181,6 +181,58 @@ export function consoleHandler(deps: ConsoleDeps) {
       log('user.created', created);
       return linkFor(created, true);
     }
+    if (path === '/admin/audit' && req.method === 'GET') {
+      const filter = { event: url.searchParams.get('event') ?? '', user: url.searchParams.get('user') ?? '', since: url.searchParams.get('since') ?? '', until: url.searchParams.get('until') ?? '' };
+      const isDay = (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d);
+      const nextDay = (d: string) => new Date(Date.parse(`${d}T00:00:00Z`) + 86_400_000).toISOString();
+      const events =
+        deps.audit?.list({
+          ...(filter.event ? { event: filter.event } : {}),
+          ...(filter.user ? { actorEmail: filter.user } : {}),
+          ...(isDay(filter.since) ? { since: `${filter.since}T00:00:00.000Z` } : {}),
+          ...(isDay(filter.until) ? { until: nextDay(filter.until) } : {}),
+          limit: 200,
+        }) ?? [];
+      return send(res, 200, adminAuditPage({ events, filter }));
+    }
+
+    if ((path === '/admin/groups' || path.startsWith('/admin/groups/')) && deps.groups) {
+      const groups = deps.groups;
+      const listPage = (status: number, extra: { notice?: string; error?: string } = {}) =>
+        send(res, status, adminGroupsPage({ groups: groups.list().map((g) => ({ ...g, members: groups.members(g.id).length })), csrf: session.csrf, ...extra }));
+      if (path === '/admin/groups') {
+        if (req.method === 'GET') return listPage(200);
+        const form = await readForm(req);
+        if (!sameString(form.get('csrf') ?? '', session.csrf)) return send(res, 403, errorPage('This form has expired. Reload the page.'));
+        const name = (form.get('name') ?? '').trim();
+        try {
+          if (groups.findByName(name)) return listPage(409, { error: `A group named ${name} already exists.` });
+          groups.create(name, (form.get('description') ?? '').trim());
+        } catch (err) {
+          return listPage(400, { error: err instanceof Error ? err.message : 'That group name cannot be used.' });
+        }
+        deps.audit?.write({ event: 'group.created', actor, client_id: CONSOLE_CLIENT_ID, ip, group: name });
+        return listPage(200, { notice: `Added ${name}.` });
+      }
+      const gm = /^\/admin\/groups\/([^/]+)(?:\/(add|remove))?$/.exec(path);
+      const group = gm ? groups.findByName(decodeURIComponent(gm[1]!)) : undefined;
+      if (!gm || !group) return send(res, 404, errorPage('Not found.'));
+      const groupPage = (status: number, extra: { notice?: string; error?: string } = {}) =>
+        send(res, status, adminGroupPage({ ...group, members: groups.members(group.id), csrf: session.csrf, ...extra }));
+      if (req.method === 'GET' && !gm[2]) return groupPage(200);
+      if (req.method !== 'POST' || !gm[2]) return send(res, 404, errorPage('Not found.'));
+      const form = await readForm(req);
+      if (!sameString(form.get('csrf') ?? '', session.csrf)) return send(res, 403, errorPage('This form has expired. Reload the page.'));
+      const member = deps.users.findByEmail((form.get('email') ?? '').trim().toLowerCase());
+      if (!member) return groupPage(404, { error: 'No user with that email.' });
+      if (gm[2] === 'add') {
+        if (groups.addMember(group.id, member.id)) log('group.member_added', member, { group: group.name });
+        return groupPage(200, { notice: `${member.email} is in ${group.name}.` });
+      }
+      if (groups.removeMember(group.id, member.id)) log('group.member_removed', member, { group: group.name });
+      return groupPage(200, { notice: `${member.email} is no longer in ${group.name}.` });
+    }
+
     if (req.method === 'GET' && path === '/admin/users') {
       const query = url.searchParams.get('q') ?? '';
       return send(res, 200, adminUsersPage({ users: deps.users.list(query).map(rowView), query, csrf: session.csrf }));

@@ -62,11 +62,12 @@ export class AuditLog {
   }
 
   // Newest first.
-  list(filter: { event?: string; actorId?: string; since?: string; until?: string; limit?: number } = {}): AuditRecord[] {
+  list(filter: { event?: string; actorId?: string; actorEmail?: string; since?: string; until?: string; limit?: number } = {}): AuditRecord[] {
     const where: string[] = [];
     const args: (string | number)[] = [];
     if (filter.event) (where.push('event = ?'), args.push(filter.event));
     if (filter.actorId) (where.push('actor_id = ?'), args.push(filter.actorId));
+    if (filter.actorEmail) (where.push('actor_email = ? COLLATE NOCASE'), args.push(filter.actorEmail));
     if (filter.since) (where.push('time >= ?'), args.push(filter.since));
     if (filter.until) (where.push('time < ?'), args.push(filter.until));
     args.push(filter.limit ?? 100);
