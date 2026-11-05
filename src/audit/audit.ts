@@ -6,7 +6,7 @@ import type { DatabaseSync } from 'node:sqlite';
 // service without a plugin.
 
 export interface AuditActor {
-  type: 'user' | 'admin' | 'cli' | 'scim';
+  type: 'user' | 'admin' | 'cli' | 'scim' | 'system';
   id?: string;
   email?: string;
 }

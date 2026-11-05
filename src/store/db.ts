@@ -133,6 +133,32 @@ const MIGRATIONS: string[] = [
   CREATE INDEX users_external_id ON users (external_id);
   ALTER TABLE groups ADD COLUMN external_id TEXT;
   `,
+  // 8: outbound provisioning. A job means "bring this user up to date at this
+  // connector"; what to do is decided when it runs, so retries are safe and
+  // repeated changes collapse into one pending job.
+  `
+  CREATE TABLE provisioning_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    connector TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    next_at INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    done_at INTEGER,
+    failed INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE UNIQUE INDEX provisioning_jobs_pending ON provisioning_jobs (connector, user_id) WHERE done_at IS NULL;
+  CREATE INDEX provisioning_jobs_due ON provisioning_jobs (next_at) WHERE done_at IS NULL;
+  CREATE TABLE provisioning_links (
+    connector TEXT NOT NULL,
+    user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    external_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    synced_at INTEGER NOT NULL,
+    PRIMARY KEY (connector, user_id)
+  );
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

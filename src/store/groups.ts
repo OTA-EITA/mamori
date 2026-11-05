@@ -15,7 +15,22 @@ export interface Group {
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export class GroupStore {
+  private readonly listeners: ((userId: string) => void)[] = [];
+
   constructor(private readonly db: DatabaseSync) {}
+
+  // Called with each user whose group memberships may have changed.
+  onMembershipChange(listener: (userId: string) => void): void {
+    this.listeners.push(listener);
+  }
+
+  private changed(userIds: Iterable<string>): void {
+    for (const u of new Set(userIds)) for (const l of this.listeners) l(u);
+  }
+
+  private memberIds(groupId: string): string[] {
+    return (this.db.prepare('SELECT user_id FROM group_members WHERE group_id = ?').all(groupId) as { user_id: string }[]).map((r) => r.user_id);
+  }
 
   create(name: string, description = ''): Group {
     if (!NAME.test(name)) throw new Error('use 1-64 letters, digits, dots, hyphens or underscores for a group name');
@@ -39,14 +54,20 @@ export class GroupStore {
   rename(id: string, name: string): void {
     if (!NAME.test(name)) throw new Error('use 1-64 letters, digits, dots, hyphens or underscores for a group name');
     this.db.prepare('UPDATE groups SET name = ? WHERE id = ?').run(name, id);
+    // A connector follows a group by name.
+    this.changed(this.memberIds(id));
   }
 
   delete(id: string): boolean {
-    return Number(this.db.prepare('DELETE FROM groups WHERE id = ?').run(id).changes) > 0;
+    const members = this.memberIds(id);
+    const deleted = Number(this.db.prepare('DELETE FROM groups WHERE id = ?').run(id).changes) > 0;
+    if (deleted) this.changed(members);
+    return deleted;
   }
 
   // Replaces the members with exactly these users.
   setMembers(id: string, userIds: string[]): void {
+    const before = this.memberIds(id);
     this.db.exec('BEGIN');
     try {
       this.db.prepare('DELETE FROM group_members WHERE group_id = ?').run(id);
@@ -57,6 +78,7 @@ export class GroupStore {
       this.db.exec('ROLLBACK');
       throw err;
     }
+    this.changed([...before, ...userIds]);
   }
 
   findByName(name: string): Group | undefined {
@@ -69,12 +91,16 @@ export class GroupStore {
 
   // Returns false when the user was already a member.
   addMember(groupId: string, userId: string): boolean {
-    return Number(this.db.prepare('INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)').run(groupId, userId).changes) > 0;
+    const added = Number(this.db.prepare('INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)').run(groupId, userId).changes) > 0;
+    if (added) this.changed([userId]);
+    return added;
   }
 
   // Returns false when the user was not a member.
   removeMember(groupId: string, userId: string): boolean {
-    return Number(this.db.prepare('DELETE FROM group_members WHERE group_id = ? AND user_id = ?').run(groupId, userId).changes) > 0;
+    const removed = Number(this.db.prepare('DELETE FROM group_members WHERE group_id = ? AND user_id = ?').run(groupId, userId).changes) > 0;
+    if (removed) this.changed([userId]);
+    return removed;
   }
 
   members(groupId: string): { id: string; email: string; name: string }[] {

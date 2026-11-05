@@ -54,7 +54,20 @@ function toUser(row: UserRow, box: SecretBox): User {
   };
 }
 
+type ChangeListener = (userId: string) => void;
+
 export class UserStore {
+  private readonly listeners: ChangeListener[] = [];
+
+  // Called after any change that provisioning cares about.
+  onChange(listener: ChangeListener): void {
+    this.listeners.push(listener);
+  }
+
+  private changed(id: string): void {
+    for (const l of this.listeners) l(id);
+  }
+
   // TOTP secrets are stored sealed with this box and opened when read.
   constructor(
     private readonly db: DatabaseSync,
@@ -133,12 +146,14 @@ export class UserStore {
     if (changes.email !== undefined) this.db.prepare('UPDATE users SET email = ?, updated_at = ? WHERE id = ?').run(changes.email, now, id);
     if (changes.name !== undefined) this.db.prepare('UPDATE users SET name = ?, updated_at = ? WHERE id = ?').run(changes.name, now, id);
     if (changes.externalId !== undefined) this.db.prepare('UPDATE users SET external_id = ?, updated_at = ? WHERE id = ?').run(changes.externalId, now, id);
+    if (changes.email !== undefined || changes.name !== undefined) this.changed(id);
   }
 
   // SCIM DELETE: disable, sign out everywhere, and hide from SCIM.
   markDeleted(id: string): void {
     this.setDisabled(id, true);
     this.db.prepare('UPDATE users SET deleted_at = ?, updated_at = ? WHERE id = ?').run(new Date().toISOString(), new Date().toISOString(), id);
+    this.changed(id);
   }
 
   // Users that SCIM can see, matching every given field exactly
@@ -193,6 +208,7 @@ export class UserStore {
       revokeAccount(this.db, id);
       this.db.prepare('DELETE FROM console_sessions WHERE user_id = ?').run(id);
     }
+    this.changed(id);
   }
 }
 
