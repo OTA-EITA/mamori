@@ -16,8 +16,19 @@ export function createProvider(config: MamoriConfig, db: DatabaseSync, users: Us
     clients: [...config.clients, consoleClient(config.issuer)],
     jwks: signingJwks(db) as Configuration['jwks'],
     cookies: { keys: cookieKeys(db) },
-    // Require PKCE for every client, not only public ones.
-    pkce: { required: () => true },
+    // Require PKCE for every client, not only public ones. A confidential
+    // client (one with a secret) can opt out with "pkce_optional": true, for
+    // apps that do not send PKCE, such as some SaaS SSO settings. Public
+    // clients cannot opt out.
+    pkce: {
+      required: (_ctx, client) => !(client.clientAuthMethod !== 'none' && (client as unknown as { pkce_optional?: boolean }).pkce_optional === true),
+    },
+    extraClientMetadata: {
+      properties: ['pkce_optional'],
+      validator(_ctx, key, value) {
+        if (key === 'pkce_optional' && value !== undefined && typeof value !== 'boolean') throw new Error('pkce_optional must be true or false');
+      },
+    },
     scopes: ['openid', 'email', 'profile', 'groups', 'offline_access'],
     claims: { openid: ['sub', 'amr'], email: ['email', 'email_verified'], profile: ['name'], groups: ['groups'] },
     // Many SaaS apps read the email from the ID token instead of calling

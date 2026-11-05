@@ -108,7 +108,13 @@ beforeAll(async () => {
       encryptionKeyFile: '',
       auditLog: 'off',
       auditRetentionDays: 400,
-      clients: [{ client_id: 'app', client_secret: 'app-secret', redirect_uris: [REDIRECT_URI], client_name: 'Test App' }],
+      clients: [
+        { client_id: 'app', client_secret: 'app-secret', redirect_uris: [REDIRECT_URI], client_name: 'Test App' },
+        // Like Google Workspace SSO: a confidential client that may not send PKCE.
+        { client_id: 'saas', client_secret: 'saas-secret', redirect_uris: [REDIRECT_URI], client_name: 'SaaS', pkce_optional: true },
+        // A public client cannot opt out of PKCE.
+        { client_id: 'spa', token_endpoint_auth_method: 'none', redirect_uris: [REDIRECT_URI], client_name: 'SPA', pkce_optional: true },
+      ],
     },
     db,
     users,
@@ -284,6 +290,31 @@ describe('sign-in with authorization code + PKCE', () => {
     const location = new URL(res.headers.get('location')!);
     expect(location.searchParams.get('error')).toBe('invalid_request');
     expect(location.searchParams.get('error_description')).toMatch(/PKCE/);
+  });
+
+  it('lets a confidential client with pkce_optional sign in without PKCE, but never a public one', async () => {
+    const authorizeUrl = (clientId: string) => {
+      const url = new URL('/auth', issuer);
+      url.search = new URLSearchParams({ client_id: clientId, response_type: 'code', redirect_uri: REDIRECT_URI, scope: 'openid email', state: 's' }).toString();
+      return url.toString();
+    };
+    const spa = new URL((await fetch(authorizeUrl('spa'), { redirect: 'manual' })).headers.get('location')!);
+    expect(spa.searchParams.get('error_description')).toMatch(/PKCE/);
+
+    const browser = new Browser();
+    const page = await browser.go(authorizeUrl('saas'));
+    expect(page.body).toContain('to SaaS');
+    const done = await browser.go(formAction(page.body), { method: 'POST', form: { email: 'alice@example.com', password: 'alice-password-1' } });
+    const code = new URL(done.url).searchParams.get('code');
+    expect(code).toBeTruthy();
+    const token = await fetch(new URL('/token', issuer), {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', authorization: `Basic ${Buffer.from('saas:saas-secret').toString('base64')}` },
+      body: new URLSearchParams({ grant_type: 'authorization_code', code: code!, redirect_uri: REDIRECT_URI }).toString(),
+    });
+    expect(token.status).toBe(200);
+    const idToken = ((await token.json()) as { id_token: string }).id_token;
+    expect(JSON.parse(Buffer.from(idToken.split('.')[1]!, 'base64url').toString()).email).toBe('alice@example.com');
   });
 });
 
