@@ -1,0 +1,20 @@
+name: Feature request
+description: Something mamori should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The situation and the people involved, before the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+  - type: textarea
+    id: apps
+    attributes:
+      label: Apps or services involved
+      description: For connectors and SSO, which SaaS and which plan.
