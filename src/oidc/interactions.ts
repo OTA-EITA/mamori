@@ -8,8 +8,11 @@ import { looksLikeRecoveryCode, type RecoveryCodes } from '../console/recovery.j
 import type { UserStore } from '../store/users.js';
 import { clientIp } from '../clientIp.js';
 import { SignInThrottle } from './throttle.js';
-import { errorPage, loginPage, mfaSetupDonePage, mfaSetupPage, totpPage } from './pages.js';
-import { readForm, send } from '../http.js';
+import { errorPage, loginPage, mfaSetupDonePage, mfaSetupPage, secondFactorPage } from './pages.js';
+import { readForm, readJson, send, sendJson, SCRIPT_CSP } from '../http.js';
+import type { PasskeyStore } from '../store/passkeys.js';
+import { passkeyAmr, type WebAuthn } from '../passkeys/webauthn.js';
+import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 
 export type MfaPolicy = 'optional' | 'required';
 
@@ -25,6 +28,8 @@ export interface InteractionOptions {
   mfaPolicy?: () => MfaPolicy;
   // Name shown in authenticator apps, for the setup step.
   totpIssuer?: string;
+  passkeys?: PasskeyStore;
+  webauthn?: WebAuthn;
   trustProxy?: boolean;
   now?: () => number;
   sleep?: (seconds: number) => Promise<void>;
@@ -37,13 +42,18 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
   const sleep = opts.sleep ?? realSleep;
   const throttle = new SignInThrottle(now);
   const audit = opts.audit;
-  // Users who passed the password step and still owe a TOTP code, keyed by interaction uid.
-  const pendingTotp = new Map<string, { accountId: string; expires: number }>();
+  // Users who passed the password step and still owe a second factor (TOTP
+  // code, recovery code or passkey), keyed by interaction uid.
+  const pendingSecond = new Map<string, { accountId: string; expires: number }>();
   // Users who passed the password step and must set up a second factor first.
   const pendingSetup = new Map<string, { accountId: string; secret: string; expires: number }>();
   // Users who finished the setup and are looking at their recovery codes.
   const pendingContinue = new Map<string, { accountId: string; expires: number }>();
   const mfaPolicy = opts.mfaPolicy ?? (() => 'optional' as const);
+  // WebAuthn challenges handed out to this interaction.
+  const challenges = new Map<string, { challenge: string; expires: number }>();
+  const passkeysOf = (userId: string) => opts.passkeys?.listByUser(userId) ?? [];
+  const html = (status: number, page: string, res: ServerResponse) => send(res, status, page, { 'content-security-policy': SCRIPT_CSP });
   const setupQr = (email: string, secret: string) =>
     renderSVG(buildOtpauthUri({ issuer: opts.totpIssuer ?? new URL(provider.issuer).hostname, account: email, secret }));
 
@@ -78,7 +88,7 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
 
     if (req.method === 'GET' && action === undefined) {
       if (details.prompt.name === 'consent') return grantConsent(req, res);
-      return send(res, 200, loginPage(uid, { client: clientName }));
+      return html(200, loginPage(uid, { client: clientName, passkeys: !!opts.webauthn }), res);
     }
 
     if (req.method === 'POST' && action === 'login') {
@@ -95,9 +105,10 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
         log('sign_in.failed', email, { reason: 'wrong_password' });
         return send(res, 401, loginPage(uid, { client: clientName, email, error: 'The email or password is not correct.' }));
       }
-      if (user.totpSecret) {
-        pendingTotp.set(uid, { accountId: user.id, expires: now() + 5 * 60 });
-        return send(res, 200, totpPage(uid, {}));
+      const hasPasskey = passkeysOf(user.id).length > 0;
+      if (user.totpSecret || hasPasskey) {
+        pendingSecond.set(uid, { accountId: user.id, expires: now() + 5 * 60 });
+        return html(200, secondFactorPage(uid, { code: user.totpSecret !== null, passkey: hasPasskey && !!opts.webauthn }), res);
       }
       throttle.succeed(email, ip);
       if (mfaPolicy() === 'required') {
@@ -143,9 +154,9 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
     }
 
     if (req.method === 'POST' && action === 'totp') {
-      const pending = pendingTotp.get(uid);
+      const pending = pendingSecond.get(uid);
       if (!pending || pending.expires <= now()) {
-        pendingTotp.delete(uid);
+        pendingSecond.delete(uid);
         return send(res, 400, loginPage(uid, { client: clientName, error: 'Sign in again.' }));
       }
       const user = users.findById(pending.accountId);
@@ -153,7 +164,7 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
       // The same throttling as the password step. Without it, someone who has
       // the password could try codes as fast as the server answers.
       if (throttle.isLocked(key, ip)) {
-        pendingTotp.delete(uid);
+        pendingSecond.delete(uid);
         log('sign_in.throttled', key, { step: 'otp' }, user?.id);
         return send(res, 429, loginPage(uid, { client: clientName, error: 'Too many failed attempts. Try again in 15 minutes.' }));
       }
@@ -164,7 +175,7 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
       // A recovery code can stand in for the TOTP code. It is one-time too, so
       // the ID token reports it as "otp"; the audit log tells them apart.
       if (user && opts.recovery && looksLikeRecoveryCode(input) && opts.recovery.use(user.id, input)) {
-        pendingTotp.delete(uid);
+        pendingSecond.delete(uid);
         throttle.succeed(user.email.toLowerCase(), ip);
         users.setLastSignIn(user.id, new Date(now() * 1000));
         log('recovery_code.used', user.email, { remaining: opts.recovery.remaining(user.id) }, user.id);
@@ -177,15 +188,57 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
       if (!user || !result.ok || result.counter === undefined) {
         throttle.fail(key, ip);
         log('mfa.challenge_failed', key, { method: 'otp' }, user?.id);
-        if (throttle.isLocked(key, ip)) pendingTotp.delete(uid);
-        return send(res, 401, totpPage(uid, { error: 'The code is not correct.' }));
+        if (throttle.isLocked(key, ip)) pendingSecond.delete(uid);
+        return html(401, secondFactorPage(uid, { code: user?.totpSecret != null, passkey: !!user && passkeysOf(user.id).length > 0 && !!opts.webauthn, error: 'The code is not correct.' }), res);
       }
-      pendingTotp.delete(uid);
+      pendingSecond.delete(uid);
       users.setTotpLastCounter(user.id, result.counter);
       throttle.succeed(user.email.toLowerCase(), ip);
       users.setLastSignIn(user.id, new Date(now() * 1000));
       log('sign_in.succeeded', user.email, { amr: OTP_AMR }, user.id);
       return finishLogin(req, res, user.id, OTP_AMR);
+    }
+
+    if (req.method === 'POST' && action === 'passkey-options' && opts.webauthn) {
+      // After a password, only that user's passkeys; otherwise any passkey of
+      // this site (usernameless sign-in).
+      const second = pendingSecond.get(uid);
+      const options = await opts.webauthn.authenticationOptions(second ? passkeysOf(second.accountId) : []);
+      challenges.set(uid, { challenge: options.challenge, expires: now() + 5 * 60 });
+      return sendJson(res, 200, options);
+    }
+
+    if (req.method === 'POST' && action === 'passkey' && opts.webauthn && opts.passkeys) {
+      const issued = challenges.get(uid);
+      challenges.delete(uid);
+      const body = (await readJson(req)) as { response?: AuthenticationResponseJSON };
+      const response = body.response;
+      const passkey = response?.id ? opts.passkeys.find(response.id) : undefined;
+      const second = pendingSecond.get(uid);
+      const user = passkey ? users.findById(passkey.userId) : undefined;
+      if (!issued || issued.expires <= now() || !response || !passkey || !user || user.disabled || (second && second.accountId !== passkey.userId)) {
+        log(second ? 'mfa.challenge_failed' : 'sign_in.failed', user?.email ?? '', { method: 'passkey', reason: 'unknown_passkey' }, user?.id);
+        return sendJson(res, 400, { error: 'This passkey cannot sign in here. Try again or use your password.' });
+      }
+      let verified: { counter: number; backedUp: boolean } | undefined;
+      try {
+        verified = await opts.webauthn.verifyAuthentication(response, issued.challenge, passkey);
+      } catch (err) {
+        const regressed = err instanceof Error && /counter/i.test(err.message);
+        if (regressed) log('passkey.counter_regressed', user.email, { passkey: passkey.name }, user.id);
+        log(second ? 'mfa.challenge_failed' : 'sign_in.failed', user.email, { method: 'passkey', reason: regressed ? 'counter_regressed' : 'invalid' }, user.id);
+        return sendJson(res, 400, { error: 'This passkey did not work.' });
+      }
+      if (!verified) return sendJson(res, 400, { error: 'This passkey did not work.' });
+      opts.passkeys.recordUse(passkey.id, verified.counter, verified.backedUp);
+      pendingSecond.delete(uid);
+      // A passkey with user verification is two factors on its own.
+      const amr = second ? ['pwd', passkeyAmr(verified.backedUp), 'mfa'] : [passkeyAmr(verified.backedUp), 'mfa'];
+      throttle.succeed(user.email.toLowerCase(), ip);
+      users.setLastSignIn(user.id, new Date(now() * 1000));
+      log('sign_in.succeeded', user.email, { amr, method: 'passkey' }, user.id);
+      const location = await provider.interactionResult(req, res, { login: { accountId: user.id, amr } }, { mergeWithLastSubmission: false });
+      return sendJson(res, 200, { location });
     }
 
     send(res, 404, errorPage('Not found.'));

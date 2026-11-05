@@ -10,6 +10,8 @@ import { GroupStore } from './store/groups.js';
 import { consoleHandler } from './console/console.js';
 import { RecoveryCodes } from './console/recovery.js';
 import { ConsoleSessions } from './console/sessions.js';
+import { PasskeyStore } from './store/passkeys.js';
+import { WebAuthn } from './passkeys/webauthn.js';
 
 const config = loadConfig(process.env.MAMORI_CONFIG ?? 'mamori.config.json');
 const db = openDatabase(config.database);
@@ -27,7 +29,9 @@ const trustProxy = config.trustProxy ?? false;
 const createdBy = (db.prepare("SELECT value FROM settings WHERE key = 'created_by'").get() as { value: string } | undefined)?.value;
 const mfa = resolveMfaPolicy(config, createdBy);
 if (mfa.warning) console.warn(mfa.warning);
-const account = consoleHandler({ provider, users, sessions, recovery, audit, trustProxy, issuer: config.issuer, totpIssuer: config.totpIssuer });
+const passkeys = new PasskeyStore(db);
+const webauthn = new WebAuthn(config.issuer, config.totpIssuer);
+const account = consoleHandler({ provider, users, sessions, recovery, audit, trustProxy, passkeys, webauthn, issuer: config.issuer, totpIssuer: config.totpIssuer });
 
 setInterval(() => {
   deleteExpired(db);
@@ -35,6 +39,6 @@ setInterval(() => {
   audit.purge(config.auditRetentionDays);
 }, 60 * 60 * 1000).unref();
 
-createMamoriServer(provider, users, { audit, recovery, trustProxy, console: account, mfaPolicy: () => mfa.policy, totpIssuer: config.totpIssuer }).listen(config.port, () => {
+createMamoriServer(provider, users, { audit, recovery, trustProxy, console: account, mfaPolicy: () => mfa.policy, totpIssuer: config.totpIssuer, passkeys, webauthn }).listen(config.port, () => {
   console.log(`mamori listening on :${config.port}, issuer ${config.issuer}`);
 });

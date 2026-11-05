@@ -5,7 +5,10 @@ import type { ClientMetadata } from 'oidc-provider';
 import { renderSVG } from 'uqr';
 import type { AuditLog } from '../audit/audit.js';
 import { clientIp } from '../clientIp.js';
-import { cookie, readCookie, readForm, redirect, send } from '../http.js';
+import { cookie, readCookie, readForm, readJson, redirect, send, sendJson, SCRIPT_CSP } from '../http.js';
+import type { PasskeyStore } from '../store/passkeys.js';
+import type { WebAuthn } from '../passkeys/webauthn.js';
+import type { RegistrationResponseJSON } from '@simplewebauthn/server';
 import { errorPage } from '../oidc/pages.js';
 import type { UserStore } from '../store/users.js';
 import { buildOtpauthUri, decodeBase32, generateTotpSecret } from '../totp/base32.js';
@@ -48,6 +51,8 @@ export interface ConsoleDeps {
   audit?: AuditLog;
   trustProxy?: boolean;
   now?: () => number;
+  passkeys?: PasskeyStore;
+  webauthn?: WebAuthn;
 }
 
 const pkceChallenge = (verifier: string) => createHash('sha256').update(verifier).digest('base64url');
@@ -137,11 +142,38 @@ export function consoleHandler(deps: ConsoleDeps) {
       hasTotp: user.totpSecret !== null,
       recoveryCodesLeft: deps.recovery.remaining(user.id),
       csrf: session.csrf,
+      ...(deps.webauthn ? { passkeys: (deps.passkeys?.listByUser(user.id) ?? []).map((p) => ({ id: p.id, name: p.name, createdAt: p.createdAt, lastUsedAt: p.lastUsedAt })) } : {}),
       ...extra,
     });
+    const page = (status: number, html: string) => send(res, status, html, { 'content-security-policy': SCRIPT_CSP });
 
-    if (req.method === 'GET' && path === '/account') return send(res, 200, accountPage(view()));
+    if (req.method === 'GET' && path === '/account') return page(200, accountPage(view()));
     if (req.method !== 'POST') return send(res, 404, errorPage('Not found.'));
+
+    // Passkey registration is driven by /assets/passkey.js with JSON, so the
+    // CSRF token comes in a header instead of a form field.
+    if ((path === '/account/passkeys/options' || path === '/account/passkeys/register') && deps.webauthn && deps.passkeys) {
+      if (!sameString(String(req.headers['x-csrf-token'] ?? ''), session.csrf)) return sendJson(res, 403, { error: 'This page has expired. Reload it.' });
+      if (path === '/account/passkeys/options') {
+        const options = await deps.webauthn.registrationOptions(user, deps.passkeys.listByUser(user.id));
+        deps.sessions.setPendingChallenge(sessionId, options.challenge);
+        return sendJson(res, 200, options);
+      }
+      const body = (await readJson(req)) as { response?: RegistrationResponseJSON; name?: string };
+      const challenge = session.pendingChallenge;
+      deps.sessions.setPendingChallenge(sessionId, null);
+      let created: Awaited<ReturnType<WebAuthn['verifyRegistration']>>;
+      try {
+        created = challenge && body.response ? await deps.webauthn.verifyRegistration(body.response, challenge) : undefined;
+      } catch {
+        created = undefined;
+      }
+      if (!created) return sendJson(res, 400, { error: 'The passkey could not be added. Try again.' });
+      const name = (body.name ?? '').trim().slice(0, 60) || `Passkey added ${new Date(now() * 1000).toISOString().slice(0, 10)}`;
+      deps.passkeys.add({ ...created, userId: user.id, name });
+      log('passkey.added', { passkey: name, synced: created.backedUp });
+      return sendJson(res, 200, { location: '/account' });
+    }
 
     const form = await readForm(req);
     if (!sameString(form.get('csrf') ?? '', session.csrf)) return send(res, 403, errorPage('This form has expired. Open your account page again.'));
@@ -156,7 +188,7 @@ export function consoleHandler(deps: ConsoleDeps) {
     }
 
     if (path === '/account/totp/start') {
-      if (user.totpSecret) return send(res, 409, accountPage(view({ error: 'An authenticator app is already set up. Remove it first.' })));
+      if (user.totpSecret) return page(409, accountPage(view({ error: 'An authenticator app is already set up. Remove it first.' })));
       const secret = generateTotpSecret();
       deps.sessions.setPendingTotp(sessionId, secret);
       const uri = buildOtpauthUri({ issuer: deps.totpIssuer, account: user.email, secret });
@@ -181,7 +213,7 @@ export function consoleHandler(deps: ConsoleDeps) {
         log('recovery_codes.generated');
         return send(res, 200, recoveryCodesPage({ codes, intro: 'Your authenticator app is set up.' }));
       }
-      return send(res, 200, accountPage(view({ notice: 'Your authenticator app is set up.' })));
+      return page(200, accountPage(view({ notice: 'Your authenticator app is set up.' })));
     }
 
     if (path === '/account/totp/remove') {
@@ -191,10 +223,18 @@ export function consoleHandler(deps: ConsoleDeps) {
       const result = secret
         ? verifyTotp(secret, (form.get('code') ?? '').trim(), now(), user.totpLastCounter !== null ? { lastUsedCounter: user.totpLastCounter } : {})
         : { ok: false };
-      if (!result.ok) return send(res, 400, accountPage(view({ error: 'That code is not correct.' })));
+      if (!result.ok) return page(400, accountPage(view({ error: 'That code is not correct.' })));
       deps.users.setTotpSecret(user.id, null);
       log('totp.removed');
-      return send(res, 200, accountPage({ ...view({ notice: 'The authenticator app was removed.' }), hasTotp: false }));
+      return page(200, accountPage({ ...view({ notice: 'The authenticator app was removed.' }), hasTotp: false }));
+    }
+
+    if (path === '/account/passkeys/remove' && deps.passkeys) {
+      const id = form.get('id') ?? '';
+      const passkey = deps.passkeys.find(id);
+      if (!passkey || !deps.passkeys.remove(user.id, id)) return page(404, accountPage(view({ error: 'That passkey was not found.' })));
+      log('passkey.removed', { passkey: passkey.name });
+      return page(200, accountPage(view({ notice: `Removed ${passkey.name}.` })));
     }
 
     if (path === '/account/recovery-codes') {

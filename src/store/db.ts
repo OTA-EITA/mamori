@@ -90,6 +90,23 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (user_id, code_hash)
   );
   `,
+  // 5: passkeys, and the WebAuthn challenge of a registration in progress.
+  `
+  CREATE TABLE passkeys (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    public_key TEXT NOT NULL,
+    counter INTEGER NOT NULL,
+    transports TEXT NOT NULL,
+    backup_eligible INTEGER NOT NULL,
+    backed_up INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+  );
+  CREATE INDEX passkeys_user ON passkeys (user_id);
+  ALTER TABLE console_sessions ADD COLUMN pending_challenge TEXT;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

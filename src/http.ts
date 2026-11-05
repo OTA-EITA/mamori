@@ -42,3 +42,22 @@ export function cookie(name: string, value: string, opts: { secure: boolean; max
   if (opts.maxAge !== undefined) attrs.push(`Max-Age=${opts.maxAge}`);
   return attrs.join('; ');
 }
+
+export async function readJson(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > 64 * 1024) throw new Error('request body too large');
+    chunks.push(chunk as Buffer);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+}
+
+export function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.end(JSON.stringify(body));
+}
+
+// For pages that load /assets/passkey.js. Still no inline script.
+export const SCRIPT_CSP = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'";

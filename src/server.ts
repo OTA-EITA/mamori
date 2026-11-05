@@ -4,8 +4,9 @@ import type { UserStore } from './store/users.js';
 import { interactionHandler, type InteractionOptions } from './oidc/interactions.js';
 import { errorPage } from './oidc/pages.js';
 import { CALLBACK_PATH } from './console/console.js';
+import { PASSKEY_SCRIPT } from './passkeys/script.js';
 
-const INTERACTION = /^\/interaction\/([\w-]+)(?:\/(login|totp|setup|continue))?$/;
+const INTERACTION = /^\/interaction\/([\w-]+)(?:\/(login|totp|setup|continue|passkey-options|passkey))?$/;
 
 export interface RequestHandlerOptions extends InteractionOptions {
   console?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
@@ -16,6 +17,11 @@ export function createRequestHandler(provider: Provider, users: UserStore, opts:
   const oidc = provider.callback();
   return (req: IncomingMessage, res: ServerResponse): void => {
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+    if (path === '/assets/passkey.js') {
+      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=3600', 'x-content-type-options': 'nosniff' });
+      res.end(PASSKEY_SCRIPT);
+      return;
+    }
     if (path === '/healthz') {
       res.writeHead(200, { 'content-type': 'text/plain' }).end('ok');
       return;

@@ -14,6 +14,9 @@ import { GroupStore } from '../src/store/groups.js';
 import { consoleHandler } from '../src/console/console.js';
 import { RecoveryCodes } from '../src/console/recovery.js';
 import { ConsoleSessions } from '../src/console/sessions.js';
+import { PasskeyStore } from '../src/store/passkeys.js';
+import { WebAuthn } from '../src/passkeys/webauthn.js';
+import { SoftAuthenticator } from './authenticator.js';
 import { SecretBox } from '../src/store/secretBox.js';
 import { randomBytes } from 'node:crypto';
 
@@ -32,14 +35,15 @@ const ginaSecret = generateTotpSecret();
 class Browser {
   private readonly cookies = new Map<string, string>();
 
-  async go(url: string, init: { method?: string; form?: Record<string, string> } = {}): Promise<{ url: string; status: number; body: string }> {
+  async go(url: string, init: { method?: string; form?: Record<string, string>; json?: unknown; headers?: Record<string, string> } = {}): Promise<{ url: string; status: number; body: string }> {
     let current = url;
     let method = init.method ?? 'GET';
-    let body: string | undefined = init.form ? new URLSearchParams(init.form).toString() : undefined;
+    let body: string | undefined = init.json !== undefined ? JSON.stringify(init.json) : init.form ? new URLSearchParams(init.form).toString() : undefined;
+    let extra = init.headers ?? {};
     for (let hops = 0; hops < 20; hops++) {
       if (current.startsWith(REDIRECT_URI)) return { url: current, status: 0, body: '' };
-      const headers: Record<string, string> = { cookie: [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; ') };
-      if (body) headers['content-type'] = 'application/x-www-form-urlencoded';
+      const headers: Record<string, string> = { cookie: [...this.cookies].map(([k, v]) => `${k}=${v}`).join('; '), ...extra };
+      if (body) headers['content-type'] = init.json !== undefined ? 'application/json' : 'application/x-www-form-urlencoded';
       const res = await fetch(current, { method, headers, redirect: 'manual', ...(body ? { body } : {}) });
       for (const c of res.headers.getSetCookie()) {
         const [pair] = c.split(';');
@@ -51,6 +55,7 @@ class Browser {
         current = new URL(location, current).toString();
         method = 'GET';
         body = undefined;
+        extra = {};
         continue;
       }
       return { url: current, status: res.status, body: await res.text() };
@@ -111,8 +116,10 @@ beforeAll(async () => {
   // No real waiting for the throttling delays in tests; record them instead.
   const recovery = new RecoveryCodes(db);
   const now = () => Math.floor(Date.now() / 1000);
-  const account = consoleHandler({ provider, users, sessions: new ConsoleSessions(db, testBox, now), recovery, audit, issuer, totpIssuer: 'mamori-test' });
-  handler = createRequestHandler(provider, users, { audit, recovery, console: account, mfaPolicy: () => mfaPolicy, totpIssuer: 'mamori-test', sleep: async (seconds) => void sleeps.push(seconds) });
+  const passkeys = new PasskeyStore(db);
+  const webauthn = new WebAuthn(issuer, 'mamori-test');
+  const account = consoleHandler({ provider, users, sessions: new ConsoleSessions(db, testBox, now), recovery, audit, passkeys, webauthn, issuer, totpIssuer: 'mamori-test' });
+  handler = createRequestHandler(provider, users, { audit, recovery, console: account, mfaPolicy: () => mfaPolicy, totpIssuer: 'mamori-test', passkeys, webauthn, sleep: async (seconds) => void sleeps.push(seconds) });
   const alice = await users.create({ email: 'alice@example.com', name: 'Alice', password: 'alice-password-1' });
   for (const name of ['engineering', 'all-staff']) groups.addMember(groups.create(name).id, alice.id);
   const carol = await users.create({ email: 'carol@example.com', name: 'Carol', password: 'carol-password' });
@@ -122,6 +129,7 @@ beforeAll(async () => {
   users.setTotpSecret(bob.id, totpSecret);
   await users.create({ email: 'frank@example.com', name: 'Frank', password: 'frank-password-1' });
   await users.create({ email: 'hana@example.com', name: 'Hana', password: 'hana-password-1' });
+  await users.create({ email: 'ivy@example.com', name: 'Ivy', password: 'ivy-password-12' });
   const gina = await users.create({ email: 'gina@example.com', name: 'Gina', password: 'gina-password-1' });
   users.setTotpSecret(gina.id, ginaSecret);
   const erin = await users.create({ email: 'erin@example.com', name: 'Erin', password: 'erin-password-1' });
@@ -158,7 +166,7 @@ describe('sign-in with authorization code + PKCE', () => {
     const browser = new Browser();
     const { page, verifier, state } = await startLogin(browser, config);
     const totp = await browser.go(formAction(page.body), { method: 'POST', form: { email: 'bob@example.com', password: 'bob-password-12' } });
-    expect(totp.body).toContain('Verification code');
+    expect(totp.body).toContain('Verify it is you');
 
     const wrong = await browser.go(formAction(totp.body), { method: 'POST', form: { code: '000000' } });
     expect(wrong.status).toBe(401);
@@ -204,7 +212,7 @@ describe('sign-in with authorization code + PKCE', () => {
     const browser = new Browser();
     const { page } = await startLogin(browser, config);
     let res = await browser.go(formAction(page.body), { method: 'POST', form: { email: 'erin@example.com', password: 'erin-password-1' } });
-    expect(res.body).toContain('Verification code');
+    expect(res.body).toContain('Verify it is you');
     sleeps.length = 0;
     for (let i = 0; i < 10; i++) {
       res = await browser.go(formAction(res.body), { method: 'POST', form: { code: 'wrong!' } });
@@ -369,5 +377,98 @@ describe('account page', () => {
     const refused = await browser.go(at('/account/totp/remove'), { method: 'POST', form: { csrf, code: '000000' } });
     expect(refused.status).toBe(400);
     expect(users.findByEmail('gina@example.com')!.totpSecret).toBe(ginaSecret);
+  });
+});
+
+describe('passkeys', () => {
+  const at = (path: string) => new URL(path, issuer).toString();
+  const uidOf = (html: string) => /\/interaction\/([\w-]+)\//.exec(html)![1]!;
+  const device = () => new SoftAuthenticator(new URL(issuer).origin);
+  const synced = () => new SoftAuthenticator(new URL(issuer).origin, true);
+  // Ivy's registered passkeys; once she has one, signing in asks for it.
+  const ivyKeys: SoftAuthenticator[] = [];
+
+  async function addPasskey(auth: SoftAuthenticator, name: string) {
+    const browser = new Browser();
+    const login = await browser.go(at('/account'));
+    let page = await browser.go(formAction(login.body), { method: 'POST', form: { email: 'ivy@example.com', password: 'ivy-password-12' } });
+    if (ivyKeys.length) {
+      const second = await passkeySignIn(browser, page.body, ivyKeys[0]!);
+      page = await browser.go(new URL(second.body.location!, issuer).toString());
+    }
+    const csrf = /data-csrf="([^"]+)"/.exec(page.body)![1]!;
+    const noCsrf = await browser.go(at('/account/passkeys/options'), { method: 'POST', json: {} });
+    expect(noCsrf.status).toBe(403);
+    const options = JSON.parse((await browser.go(at('/account/passkeys/options'), { method: 'POST', json: {}, headers: { 'x-csrf-token': csrf } })).body);
+    expect(options.authenticatorSelection).toMatchObject({ residentKey: 'required', userVerification: 'required' });
+    const done = await browser.go(at('/account/passkeys/register'), { method: 'POST', json: { response: auth.register(options), name }, headers: { 'x-csrf-token': csrf } });
+    expect(JSON.parse(done.body)).toEqual({ location: '/account' });
+    ivyKeys.push(auth);
+    return browser;
+  }
+
+  async function passkeySignIn(browser: Browser, html: string, auth: SoftAuthenticator, opts: { counter?: number } = {}) {
+    const uid = uidOf(html);
+    const options = JSON.parse((await browser.go(at(`/interaction/${uid}/passkey-options`), { method: 'POST', json: {} })).body);
+    const res = await browser.go(at(`/interaction/${uid}/passkey`), { method: 'POST', json: { response: auth.authenticate(options, opts) } });
+    return { options, status: res.status, body: JSON.parse(res.body) as { location?: string; error?: string } };
+  }
+
+  async function finish(browser: Browser, location: string, verifier: string, state: string) {
+    const config = await discover();
+    const done = await browser.go(new URL(location, issuer).toString());
+    return client.authorizationCodeGrant(config, new URL(done.url), { pkceCodeVerifier: verifier, expectedState: state });
+  }
+
+  it('adds a passkey on the account page and signs in with it without an email', async () => {
+    const laptop = device();
+    const browser = await addPasskey(laptop, 'Work laptop');
+    expect((await browser.go(at('/account'))).body).toContain('Work laptop');
+
+    const app = new Browser();
+    const { page, verifier, state } = await startLogin(app, await discover());
+    expect(page.body).toContain('Sign in with a passkey');
+    const result = await passkeySignIn(app, page.body, laptop);
+    expect(result.options.allowCredentials).toEqual([]);
+    const tokens = await finish(app, result.body.location!, verifier, state);
+    expect(tokens.claims()!.amr).toEqual(['hwk', 'mfa']);
+    expect(tokens.claims()!.email).toBe('ivy@example.com');
+  });
+
+  it('asks for the passkey after the password, and reports a synced passkey as swk', async () => {
+    const phone = synced();
+    await addPasskey(phone, 'Phone');
+    const app = new Browser();
+    const { page, verifier, state } = await startLogin(app, await discover());
+    const second = await app.go(formAction(page.body), { method: 'POST', form: { email: 'ivy@example.com', password: 'ivy-password-12' } });
+    expect(second.body).toContain('Use your passkey');
+    const result = await passkeySignIn(app, second.body, phone);
+    // After a password, only this user's passkeys are offered.
+    expect(result.options.allowCredentials.map((c: { id: string }) => c.id)).toContain(phone.id);
+    const tokens = await finish(app, result.body.location!, verifier, state);
+    expect(tokens.claims()!.amr).toEqual(['pwd', 'swk', 'mfa']);
+  });
+
+  it('refuses a passkey whose sign counter went backwards', async () => {
+    const key = device();
+    await addPasskey(key, 'Security key');
+    const first = new Browser();
+    const { page } = await startLogin(first, await discover());
+    expect((await passkeySignIn(first, page.body, key, { counter: 10 })).status).toBe(200);
+
+    const clone = new Browser();
+    const { page: again } = await startLogin(clone, await discover());
+    const result = await passkeySignIn(clone, again.body, key, { counter: 5 });
+    expect(result.status).toBe(400);
+    expect(events().some((e) => e.event === 'passkey.counter_regressed')).toBe(true);
+  });
+
+  it('does not accept a passkey that was never registered', async () => {
+    const app = new Browser();
+    const { page } = await startLogin(app, await discover());
+    const stranger = device();
+    stranger.userHandle = 'nobody';
+    const result = await passkeySignIn(app, page.body, stranger);
+    expect(result.status).toBe(400);
   });
 });

@@ -16,6 +16,8 @@ export interface ConsoleSession {
   csrf: string;
   // A TOTP secret shown to the user but not confirmed with a code yet.
   pendingTotp: string | null;
+  // The WebAuthn challenge of a passkey registration in progress.
+  pendingChallenge: string | null;
 }
 
 interface Row {
@@ -23,6 +25,7 @@ interface Row {
   amr: string;
   csrf: string;
   pending_totp: string | null;
+  pending_challenge: string | null;
   created_at: number;
   last_seen_at: number;
 }
@@ -63,11 +66,16 @@ export class ConsoleSessions {
       amr: JSON.parse(row.amr) as string[],
       csrf: row.csrf,
       pendingTotp: row.pending_totp === null ? null : this.box.open(row.pending_totp),
+      pendingChallenge: row.pending_challenge,
     };
   }
 
   setPendingTotp(id: string, secret: string | null): void {
     this.db.prepare('UPDATE console_sessions SET pending_totp = ? WHERE id_hash = ?').run(secret === null ? null : this.box.seal(secret), hash(id));
+  }
+
+  setPendingChallenge(id: string, challenge: string | null): void {
+    this.db.prepare('UPDATE console_sessions SET pending_challenge = ? WHERE id_hash = ?').run(challenge, hash(id));
   }
 
   delete(id: string): void {

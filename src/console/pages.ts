@@ -35,6 +35,8 @@ export interface AccountView {
   hasTotp: boolean;
   recoveryCodesLeft: number;
   csrf: string;
+  // Undefined when passkeys are not available on this server.
+  passkeys?: { id: string; name: string; createdAt: string; lastUsedAt: string | null }[];
   notice?: string;
   error?: string;
 }
@@ -57,10 +59,29 @@ export function accountPage(v: AccountView): string {
 ${v.notice ? `<p class="notice">${escape(v.notice)}</p>` : ''}
 ${v.error ? `<p class="error">${escape(v.error)}</p>` : ''}
 <p>${escape(v.name)}<br><span class="muted">${escape(v.email)}</span></p>
+${v.passkeys ? `<section><h2>Passkeys</h2>${passkeySection(v.passkeys, v.csrf)}</section>` : ''}
 <section><h2>Two-step verification</h2>${totp}</section>
 <section><h2>Recovery codes</h2>${recovery}</section>
 <section><form method="post" action="/account/logout">${csrfField(v.csrf)}<button type="submit">Sign out</button></form></section>`,
   );
+}
+
+const day = (iso: string) => iso.slice(0, 10);
+
+function passkeySection(list: NonNullable<AccountView['passkeys']>, csrf: string): string {
+  const items = list.length
+    ? `<ul>${list
+        .map(
+          (p) => `<li>${escape(p.name)} <span class="muted">added ${day(p.createdAt)}${p.lastUsedAt ? `, last used ${day(p.lastUsedAt)}` : ', not used yet'}</span>
+<form method="post" action="/account/passkeys/remove">${csrfField(csrf)}<input type="hidden" name="id" value="${escape(p.id)}"><button type="submit">Remove</button></form></li>`,
+        )
+        .join('')}</ul>`
+    : '<p class="muted">No passkeys yet. A passkey signs you in with your fingerprint, face or device PIN, without a password.</p>';
+  return `${items}
+<p id="passkey-error" class="error" hidden></p>
+<label>Name for the new passkey<input id="passkey-name" maxlength="60" placeholder="e.g. Work laptop"></label>
+<button type="button" hidden data-passkey="register" data-options="/account/passkeys/options" data-verify="/account/passkeys/register" data-csrf="${escape(csrf)}">Add a passkey</button>
+<script src="/assets/passkey.js" defer></script>`;
 }
 
 export function totpSetupPage(v: { qrSvg: string; secret: string; csrf: string; error?: string }): string {
