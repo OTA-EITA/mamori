@@ -3,16 +3,28 @@ import type Provider from 'oidc-provider';
 import type { UserStore } from './store/users.js';
 import { interactionHandler, type InteractionOptions } from './oidc/interactions.js';
 import { errorPage } from './oidc/pages.js';
+import { CALLBACK_PATH } from './console/console.js';
 
 const INTERACTION = /^\/interaction\/([\w-]+)(?:\/(login|totp))?$/;
 
-export function createRequestHandler(provider: Provider, users: UserStore, opts: InteractionOptions = {}) {
+export interface RequestHandlerOptions extends InteractionOptions {
+  console?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+}
+
+export function createRequestHandler(provider: Provider, users: UserStore, opts: RequestHandlerOptions = {}) {
   const interactions = interactionHandler(provider, users, opts);
   const oidc = provider.callback();
   return (req: IncomingMessage, res: ServerResponse): void => {
     const path = new URL(req.url ?? '/', 'http://localhost').pathname;
     if (path === '/healthz') {
       res.writeHead(200, { 'content-type': 'text/plain' }).end('ok');
+      return;
+    }
+    if (opts.console && (path === '/account' || path.startsWith('/account/') || path === CALLBACK_PATH)) {
+      opts.console(req, res).catch(() => {
+        if (!res.headersSent) res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(errorPage('Something went wrong. Open your account page again.'));
+      });
       return;
     }
     const match = INTERACTION.exec(path);
@@ -31,6 +43,6 @@ export function createRequestHandler(provider: Provider, users: UserStore, opts:
   };
 }
 
-export function createMamoriServer(provider: Provider, users: UserStore, opts: InteractionOptions = {}): Server {
+export function createMamoriServer(provider: Provider, users: UserStore, opts: RequestHandlerOptions = {}): Server {
   return createServer(createRequestHandler(provider, users, opts));
 }

@@ -39,10 +39,10 @@ export function totpPage(uid: string, opts: { error?: string }): string {
   return page(
     'Verification code',
     `<h1>Verification code</h1>
-<p>Enter the 6-digit code from your authenticator app.</p>
+<p>Enter the 6-digit code from your authenticator app, or one of your recovery codes.</p>
 ${opts.error ? `<p class="error">${escape(opts.error)}</p>` : ''}
 <form method="post" action="/interaction/${escape(uid)}/totp">
-  <label>Code<input name="code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required autofocus></label>
+  <label>Code<input name="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required autofocus></label>
   <button type="submit">Verify</button>
 </form>`,
   );

@@ -3,34 +3,16 @@ import type Provider from 'oidc-provider';
 import { decodeBase32 } from '../totp/base32.js';
 import { verifyTotp } from '../totp/totp.js';
 import type { AuditLog } from '../audit/audit.js';
+import { looksLikeRecoveryCode, type RecoveryCodes } from '../console/recovery.js';
 import type { UserStore } from '../store/users.js';
 import { clientIp } from '../clientIp.js';
 import { SignInThrottle } from './throttle.js';
 import { errorPage, loginPage, totpPage } from './pages.js';
-
-async function readForm(req: IncomingMessage): Promise<URLSearchParams> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += (chunk as Buffer).length;
-    if (size > 16 * 1024) throw new Error('request body too large');
-    chunks.push(chunk as Buffer);
-  }
-  return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
-}
-
-function send(res: ServerResponse, status: number, html: string): void {
-  res.writeHead(status, {
-    'content-type': 'text/html; charset=utf-8',
-    'cache-control': 'no-store',
-    'x-frame-options': 'DENY',
-    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
-  });
-  res.end(html);
-}
+import { readForm, send } from '../http.js';
 
 export interface InteractionOptions {
   audit?: AuditLog;
+  recovery?: RecoveryCodes;
   trustProxy?: boolean;
   now?: () => number;
   sleep?: (seconds: number) => Promise<void>;
@@ -122,8 +104,19 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
       await sleep(throttle.delaySeconds(key));
       const secret = user?.totpSecret ? decodeBase32(user.totpSecret) : null;
       const form = await readForm(req);
+      const input = (form.get('code') ?? '').trim();
+      // A recovery code can stand in for the TOTP code. It is one-time too, so
+      // the ID token reports it as "otp"; the audit log tells them apart.
+      if (user && opts.recovery && looksLikeRecoveryCode(input) && opts.recovery.use(user.id, input)) {
+        pendingTotp.delete(uid);
+        throttle.succeed(user.email.toLowerCase(), ip);
+        users.setLastSignIn(user.id, new Date(now() * 1000));
+        log('recovery_code.used', user.email, { remaining: opts.recovery.remaining(user.id) }, user.id);
+        log('sign_in.succeeded', user.email, { amr: ['pwd', 'otp'], method: 'recovery_code' }, user.id);
+        return finishLogin(req, res, user.id, ['pwd', 'otp']);
+      }
       const result = secret
-        ? verifyTotp(secret, (form.get('code') ?? '').trim(), now(), { ...(user!.totpLastCounter !== null ? { lastUsedCounter: user!.totpLastCounter } : {}) })
+        ? verifyTotp(secret, input, now(), { ...(user!.totpLastCounter !== null ? { lastUsedCounter: user!.totpLastCounter } : {}) })
         : { ok: false };
       if (!user || !result.ok || result.counter === undefined) {
         throttle.fail(key, ip);

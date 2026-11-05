@@ -1,0 +1,208 @@
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type Provider from 'oidc-provider';
+import type { ClientMetadata } from 'oidc-provider';
+import { renderSVG } from 'uqr';
+import type { AuditLog } from '../audit/audit.js';
+import { clientIp } from '../clientIp.js';
+import { cookie, readCookie, readForm, redirect, send } from '../http.js';
+import { errorPage } from '../oidc/pages.js';
+import type { UserStore } from '../store/users.js';
+import { buildOtpauthUri, decodeBase32, generateTotpSecret } from '../totp/base32.js';
+import { verifyTotp } from '../totp/totp.js';
+import { accountPage, recoveryCodesPage, signedOutPage, totpSetupPage } from './pages.js';
+import type { RecoveryCodes } from './recovery.js';
+import type { ConsoleSessions } from './sessions.js';
+
+// The account page (and, later, the admin console). It is an OIDC client of
+// mamori itself, `mamori-console`, so signing in goes through the same login,
+// throttling and audit code as every other app.
+
+export const CONSOLE_CLIENT_ID = 'mamori-console';
+export const CALLBACK_PATH = '/console/callback';
+export const SIGNED_OUT_PATH = '/account/signed-out';
+
+const SESSION_COOKIE = 'mamori_console';
+const STATE_COOKIE = 'mamori_console_state';
+const LOGIN_TTL_SECONDS = 10 * 60;
+
+export function consoleClient(issuer: string): ClientMetadata {
+  return {
+    client_id: CONSOLE_CLIENT_ID,
+    client_name: 'Your account',
+    token_endpoint_auth_method: 'none',
+    grant_types: ['authorization_code'],
+    response_types: ['code'],
+    redirect_uris: [new URL(CALLBACK_PATH, issuer).toString()],
+    post_logout_redirect_uris: [new URL(SIGNED_OUT_PATH, issuer).toString()],
+  };
+}
+
+export interface ConsoleDeps {
+  provider: Provider;
+  users: UserStore;
+  sessions: ConsoleSessions;
+  recovery: RecoveryCodes;
+  issuer: string;
+  totpIssuer: string;
+  audit?: AuditLog;
+  trustProxy?: boolean;
+  now?: () => number;
+}
+
+const pkceChallenge = (verifier: string) => createHash('sha256').update(verifier).digest('base64url');
+
+function sameString(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
+export function consoleHandler(deps: ConsoleDeps) {
+  const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
+  const secure = new URL(deps.issuer).protocol === 'https:';
+  const redirectUri = new URL(CALLBACK_PATH, deps.issuer).toString();
+  // Logins started from this browser that have not come back yet, by state.
+  // In memory, like the sign-in throttling (one instance for now).
+  const pendingLogins = new Map<string, { verifier: string; expires: number }>();
+
+  function startLogin(res: ServerResponse): void {
+    for (const [k, v] of pendingLogins) if (v.expires <= now()) pendingLogins.delete(k);
+    const state = randomBytes(24).toString('base64url');
+    const verifier = randomBytes(32).toString('base64url');
+    pendingLogins.set(state, { verifier, expires: now() + LOGIN_TTL_SECONDS });
+    const url = new URL('/auth', deps.issuer);
+    url.search = new URLSearchParams({
+      client_id: CONSOLE_CLIENT_ID,
+      response_type: 'code',
+      redirect_uri: redirectUri,
+      scope: 'openid',
+      state,
+      code_challenge: pkceChallenge(verifier),
+      code_challenge_method: 'S256',
+    }).toString();
+    redirect(res, url.pathname + url.search, { 'set-cookie': cookie(STATE_COOKIE, state, { secure, maxAge: LOGIN_TTL_SECONDS }) });
+  }
+
+  // The authorization code is checked and consumed here, inside the same
+  // process, instead of calling the token endpoint over the network: mamori is
+  // the provider, so it can read the code it issued. Everything the token
+  // endpoint would check is checked: client, redirect URI, PKCE, one use.
+  async function callback(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    const state = url.searchParams.get('state') ?? '';
+    const pending = pendingLogins.get(state);
+    pendingLogins.delete(state);
+    const fail = () => send(res, 400, errorPage('This sign-in did not work. Open your account page again.'));
+    if (!pending || pending.expires <= now() || !sameString(readCookie(req, STATE_COOKIE) ?? '', state)) return fail();
+    const code = await deps.provider.AuthorizationCode.find(url.searchParams.get('code') ?? '');
+    if (
+      !code ||
+      !code.isValid ||
+      code.clientId !== CONSOLE_CLIENT_ID ||
+      code.redirectUri !== redirectUri ||
+      code.codeChallengeMethod !== 'S256' ||
+      !code.codeChallenge ||
+      !sameString(code.codeChallenge, pkceChallenge(pending.verifier))
+    ) {
+      return fail();
+    }
+    await code.consume();
+    const user = code.accountId ? deps.users.findById(code.accountId) : undefined;
+    if (!user || user.disabled) return fail();
+    const id = deps.sessions.create(user.id, code.amr ?? []);
+    redirect(res, '/account', {
+      'set-cookie': [cookie(SESSION_COOKIE, id, { secure }), cookie(STATE_COOKIE, '', { secure, maxAge: 0 })],
+    });
+  }
+
+  return async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url = new URL(req.url ?? '/', deps.issuer);
+    const path = url.pathname;
+    if (req.method === 'GET' && path === CALLBACK_PATH) return callback(req, res, url);
+    if (req.method === 'GET' && path === SIGNED_OUT_PATH) return send(res, 200, signedOutPage());
+
+    const sessionId = readCookie(req, SESSION_COOKIE);
+    const session = deps.sessions.get(sessionId);
+    const user = session ? deps.users.findById(session.userId) : undefined;
+    if (!session || !sessionId || !user || user.disabled) {
+      if (req.method === 'GET' && path === '/account') return startLogin(res);
+      return redirect(res, '/account');
+    }
+    const ip = clientIp(req, deps.trustProxy ?? false);
+    const actor = { type: 'user' as const, id: user.id, email: user.email };
+    const log = (event: string, extra: Record<string, unknown> = {}) => deps.audit?.write({ event, actor, client_id: CONSOLE_CLIENT_ID, ip, ...extra });
+    const view = (extra: { notice?: string; error?: string } = {}) => ({
+      name: user.name,
+      email: user.email,
+      hasTotp: user.totpSecret !== null,
+      recoveryCodesLeft: deps.recovery.remaining(user.id),
+      csrf: session.csrf,
+      ...extra,
+    });
+
+    if (req.method === 'GET' && path === '/account') return send(res, 200, accountPage(view()));
+    if (req.method !== 'POST') return send(res, 404, errorPage('Not found.'));
+
+    const form = await readForm(req);
+    if (!sameString(form.get('csrf') ?? '', session.csrf)) return send(res, 403, errorPage('This form has expired. Open your account page again.'));
+
+    if (path === '/account/logout') {
+      deps.sessions.delete(sessionId);
+      log('sign_out');
+      // End the mamori session too, so the next visit asks for credentials.
+      const end = new URL('/session/end', deps.issuer);
+      end.search = new URLSearchParams({ client_id: CONSOLE_CLIENT_ID, post_logout_redirect_uri: new URL(SIGNED_OUT_PATH, deps.issuer).toString() }).toString();
+      return redirect(res, end.pathname + end.search, { 'set-cookie': cookie(SESSION_COOKIE, '', { secure, maxAge: 0 }) });
+    }
+
+    if (path === '/account/totp/start') {
+      if (user.totpSecret) return send(res, 409, accountPage(view({ error: 'An authenticator app is already set up. Remove it first.' })));
+      const secret = generateTotpSecret();
+      deps.sessions.setPendingTotp(sessionId, secret);
+      const uri = buildOtpauthUri({ issuer: deps.totpIssuer, account: user.email, secret });
+      return send(res, 200, totpSetupPage({ qrSvg: renderSVG(uri), secret, csrf: session.csrf }));
+    }
+
+    if (path === '/account/totp/confirm') {
+      const secret = session.pendingTotp;
+      if (!secret) return redirect(res, '/account');
+      const result = verifyTotp(decodeBase32(secret)!, (form.get('code') ?? '').trim(), now());
+      if (!result.ok || result.counter === undefined) {
+        const uri = buildOtpauthUri({ issuer: deps.totpIssuer, account: user.email, secret });
+        return send(res, 400, totpSetupPage({ qrSvg: renderSVG(uri), secret, csrf: session.csrf, error: 'That code is not correct. Check the time on your phone and try again.' }));
+      }
+      deps.users.setTotpSecret(user.id, secret);
+      deps.users.setTotpLastCounter(user.id, result.counter);
+      deps.sessions.setPendingTotp(sessionId, null);
+      log('totp.added');
+      // People who turn on two-step verification also need a way back in.
+      if (deps.recovery.remaining(user.id) === 0) {
+        const codes = deps.recovery.generate(user.id);
+        log('recovery_codes.generated');
+        return send(res, 200, recoveryCodesPage({ codes, intro: 'Your authenticator app is set up.' }));
+      }
+      return send(res, 200, accountPage(view({ notice: 'Your authenticator app is set up.' })));
+    }
+
+    if (path === '/account/totp/remove') {
+      // A current code is required, so a stolen session alone cannot turn off
+      // two-step verification.
+      const secret = user.totpSecret ? decodeBase32(user.totpSecret) : null;
+      const result = secret
+        ? verifyTotp(secret, (form.get('code') ?? '').trim(), now(), user.totpLastCounter !== null ? { lastUsedCounter: user.totpLastCounter } : {})
+        : { ok: false };
+      if (!result.ok) return send(res, 400, accountPage(view({ error: 'That code is not correct.' })));
+      deps.users.setTotpSecret(user.id, null);
+      log('totp.removed');
+      return send(res, 200, accountPage({ ...view({ notice: 'The authenticator app was removed.' }), hasTotp: false }));
+    }
+
+    if (path === '/account/recovery-codes') {
+      const codes = deps.recovery.generate(user.id);
+      log('recovery_codes.generated');
+      return send(res, 200, recoveryCodesPage({ codes, intro: 'New recovery codes. The old ones no longer work.' }));
+    }
+
+    return send(res, 404, errorPage('Not found.'));
+  };
+}

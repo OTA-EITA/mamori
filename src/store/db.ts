@@ -70,6 +70,26 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX group_members_user ON group_members (user_id);
   `,
+  // 4: console sessions (the account page and admin console) and recovery codes.
+  // Session ids and recovery codes are stored as hashes only.
+  `
+  CREATE TABLE console_sessions (
+    id_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    amr TEXT NOT NULL,
+    csrf TEXT NOT NULL,
+    pending_totp TEXT,
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL
+  );
+  CREATE INDEX console_sessions_user ON console_sessions (user_id);
+  CREATE TABLE recovery_codes (
+    user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    code_hash TEXT NOT NULL,
+    used_at TEXT,
+    PRIMARY KEY (user_id, code_hash)
+  );
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

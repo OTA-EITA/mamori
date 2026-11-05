@@ -6,12 +6,14 @@ import { SqliteAdapter } from '../store/oidcAdapter.js';
 import type { UserStore } from '../store/users.js';
 import type { AuditLog } from '../audit/audit.js';
 import type { GroupStore } from '../store/groups.js';
+import { consoleClient } from '../console/console.js';
+import { logoutConfirmPage } from '../console/pages.js';
 import { cookieKeys, signingJwks } from './keys.js';
 
 export function createProvider(config: MamoriConfig, db: DatabaseSync, users: UserStore, audit?: AuditLog, groups?: GroupStore): Provider {
   const configuration: Configuration = {
     adapter: (name: string) => new SqliteAdapter(db, name),
-    clients: config.clients,
+    clients: [...config.clients, consoleClient(config.issuer)],
     jwks: signingJwks(db) as Configuration['jwks'],
     cookies: { keys: cookieKeys(db) },
     // Require PKCE for every client, not only public ones.
@@ -21,7 +23,17 @@ export function createProvider(config: MamoriConfig, db: DatabaseSync, users: Us
     // Many SaaS apps read the email from the ID token instead of calling
     // userinfo, so put the claims of the granted scopes in the ID token too.
     conformIdTokenClaims: false,
-    features: { devInteractions: { enabled: false }, revocation: { enabled: true } },
+    features: {
+      devInteractions: { enabled: false },
+      revocation: { enabled: true },
+      rpInitiatedLogout: {
+        enabled: true,
+        logoutSource(ctx, form) {
+          ctx.type = 'html';
+          ctx.body = logoutConfirmPage(form);
+        },
+      },
+    },
     interactions: { url: (_ctx, interaction) => `/interaction/${interaction.uid}` },
     ttl: { AccessToken: 60 * 10, AuthorizationCode: 60, IdToken: 60 * 10, Interaction: 60 * 10, Session: 60 * 60 * 12 },
     async findAccount(_ctx, id) {

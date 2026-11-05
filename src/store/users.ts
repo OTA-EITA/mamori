@@ -103,7 +103,10 @@ export class UserStore {
   // Disabling also signs the user out of every app, not only future sign-ins.
   setDisabled(id: string, disabled: boolean): void {
     this.db.prepare('UPDATE users SET disabled = ? WHERE id = ?').run(disabled ? 1 : 0, id);
-    if (disabled) revokeAccount(this.db, id);
+    if (disabled) {
+      revokeAccount(this.db, id);
+      this.db.prepare('DELETE FROM console_sessions WHERE user_id = ?').run(id);
+    }
   }
 }
 

@@ -11,6 +11,9 @@ import { decodeBase32, generateTotpSecret } from '../src/totp/base32.js';
 import { generateTotp } from '../src/totp/totp.js';
 import { AuditLog, type AuditRecord } from '../src/audit/audit.js';
 import { GroupStore } from '../src/store/groups.js';
+import { consoleHandler } from '../src/console/console.js';
+import { RecoveryCodes } from '../src/console/recovery.js';
+import { ConsoleSessions } from '../src/console/sessions.js';
 import { SecretBox } from '../src/store/secretBox.js';
 import { randomBytes } from 'node:crypto';
 
@@ -22,6 +25,7 @@ let server: Server;
 let issuer: string;
 let users: UserStore;
 const totpSecret = generateTotpSecret();
+const ginaSecret = generateTotpSecret();
 
 // A tiny browser: keeps cookies and follows redirects until it reaches a page
 // or the client's redirect_uri.
@@ -104,7 +108,10 @@ beforeAll(async () => {
     groups,
   );
   // No real waiting for the throttling delays in tests; record them instead.
-  handler = createRequestHandler(provider, users, { audit, sleep: async (seconds) => void sleeps.push(seconds) });
+  const recovery = new RecoveryCodes(db);
+  const now = () => Math.floor(Date.now() / 1000);
+  const account = consoleHandler({ provider, users, sessions: new ConsoleSessions(db, testBox, now), recovery, audit, issuer, totpIssuer: 'mamori-test' });
+  handler = createRequestHandler(provider, users, { audit, recovery, console: account, sleep: async (seconds) => void sleeps.push(seconds) });
   const alice = await users.create({ email: 'alice@example.com', name: 'Alice', password: 'alice-password-1' });
   for (const name of ['engineering', 'all-staff']) groups.addMember(groups.create(name).id, alice.id);
   const carol = await users.create({ email: 'carol@example.com', name: 'Carol', password: 'carol-password' });
@@ -112,6 +119,9 @@ beforeAll(async () => {
   await users.create({ email: 'dave@example.com', name: 'Dave', password: 'dave-password-1' });
   const bob = await users.create({ email: 'bob@example.com', name: 'Bob', password: 'bob-password-12' });
   users.setTotpSecret(bob.id, totpSecret);
+  await users.create({ email: 'frank@example.com', name: 'Frank', password: 'frank-password-1' });
+  const gina = await users.create({ email: 'gina@example.com', name: 'Gina', password: 'gina-password-1' });
+  users.setTotpSecret(gina.id, ginaSecret);
   const erin = await users.create({ email: 'erin@example.com', name: 'Erin', password: 'erin-password-1' });
   users.setTotpSecret(erin.id, generateTotpSecret());
 });
@@ -254,5 +264,79 @@ describe('sign-in with authorization code + PKCE', () => {
     const location = new URL(res.headers.get('location')!);
     expect(location.searchParams.get('error')).toBe('invalid_request');
     expect(location.searchParams.get('error_description')).toMatch(/PKCE/);
+  });
+});
+
+function hidden(html: string, name: string): string {
+  const m = new RegExp(`name="${name}" value="([^"]+)"`).exec(html);
+  if (!m) throw new Error(`no ${name} in page`);
+  return m[1]!;
+}
+
+describe('account page', () => {
+  const at = (path: string) => new URL(path, issuer).toString();
+
+  it('lets a user turn on TOTP, get recovery codes, use one, and sign out', async () => {
+    const browser = new Browser();
+    // Not signed in: the account page sends the browser through mamori's own sign-in.
+    const login = await browser.go(at('/account'));
+    expect(login.body).toContain('Sign in');
+    const page = await browser.go(formAction(login.body), { method: 'POST', form: { email: 'frank@example.com', password: 'frank-password-1' } });
+    expect(page.url).toBe(at('/account'));
+    expect(page.body).toContain('frank@example.com');
+    expect(page.body).toContain('not set up');
+    const csrf = hidden(page.body, 'csrf');
+
+    // Forms without the CSRF token are refused.
+    expect((await browser.go(at('/account/totp/start'), { method: 'POST', form: {} })).status).toBe(403);
+
+    const setup = await browser.go(at('/account/totp/start'), { method: 'POST', form: { csrf } });
+    expect(setup.body).toContain('<svg');
+    const secret = /<code>([A-Z2-7 ]+)<\/code>/.exec(setup.body)![1]!.replace(/ /g, '');
+    const wrong = await browser.go(at('/account/totp/confirm'), { method: 'POST', form: { csrf, code: '000000' } });
+    expect(wrong.status).toBe(400);
+    const code = generateTotp(decodeBase32(secret)!, Math.floor(Date.now() / 1000)).code;
+    const done = await browser.go(at('/account/totp/confirm'), { method: 'POST', form: { csrf, code } });
+    const codes = [...done.body.matchAll(/<li>([A-Z0-9]{5}-[A-Z0-9]{5})<\/li>/g)].map((m) => m[1]!);
+    expect(codes).toHaveLength(10);
+    expect(users.findByEmail('frank@example.com')!.totpSecret).toBe(secret);
+
+    // Signing in to an app now asks for a code, and a recovery code works once.
+    const config = await discover();
+    for (const [i, expected] of [[0, 'ok'], [1, 'reused']] as const) {
+      const app = new Browser();
+      const { page: appLogin, verifier, state } = await startLogin(app, config);
+      const ask = await app.go(formAction(appLogin.body), { method: 'POST', form: { email: 'frank@example.com', password: 'frank-password-1' } });
+      expect(ask.body).toContain('recovery codes');
+      const res = await app.go(formAction(ask.body), { method: 'POST', form: { code: codes[0]!.toLowerCase() } });
+      if (expected === 'ok') {
+        const tokens = await client.authorizationCodeGrant(config, new URL(res.url), { pkceCodeVerifier: verifier, expectedState: state });
+        expect(tokens.claims()!.amr).toEqual(['pwd', 'otp']);
+      } else {
+        expect(res.status).toBe(401);
+      }
+      expect(i).toBeLessThan(2);
+    }
+    expect(events().some((e) => e.event === 'recovery_code.used' && e.remaining === 9)).toBe(true);
+
+    // Signing out ends the account session and the mamori session.
+    const confirm = await browser.go(at('/account/logout'), { method: 'POST', form: { csrf } });
+    const action = /<form[^>]*action="([^"]+)"/.exec(confirm.body)![1]!;
+    const out = await browser.go(new URL(action, issuer).toString(), { method: 'POST', form: { xsrf: hidden(confirm.body, 'xsrf'), logout: 'yes' } });
+    expect(out.url).toBe(at('/account/signed-out'));
+    const again = await browser.go(at('/account'));
+    expect(again.body).toContain('Sign in');
+  });
+
+  it('asks for a current code before removing TOTP', async () => {
+    const browser = new Browser();
+    const login = await browser.go(at('/account'));
+    const ask = await browser.go(formAction(login.body), { method: 'POST', form: { email: 'gina@example.com', password: 'gina-password-1' } });
+    const code = generateTotp(decodeBase32(ginaSecret)!, Math.floor(Date.now() / 1000)).code;
+    const page = await browser.go(formAction(ask.body), { method: 'POST', form: { code } });
+    const csrf = hidden(page.body, 'csrf');
+    const refused = await browser.go(at('/account/totp/remove'), { method: 'POST', form: { csrf, code: '000000' } });
+    expect(refused.status).toBe(400);
+    expect(users.findByEmail('gina@example.com')!.totpSecret).toBe(ginaSecret);
   });
 });
