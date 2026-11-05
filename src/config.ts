@@ -15,6 +15,10 @@ export interface MamoriConfig {
   // Key that seals TOTP secrets in the database. Created on first start.
   // Keep it out of database backups, and back it up separately.
   encryptionKeyFile: string;
+  // "required": every user must have a second factor, and one who has none
+  // sets it up during sign-in. Unset means "required" for a new database and
+  // "optional" for one upgraded from v0.1 (see resolveMfaPolicy).
+  mfa?: 'optional' | 'required';
   // Audit log lines: "-" for stdout, "off", or a file path.
   auditLog: string;
   // Audit rows older than this are deleted by the hourly cleanup.
@@ -32,7 +36,22 @@ export function loadConfig(path: string): MamoriConfig {
     totpIssuer: raw.totpIssuer ?? new URL(raw.issuer).hostname,
     clients: raw.clients ?? [],
     encryptionKeyFile: raw.encryptionKeyFile ?? 'mamori.key',
+    ...(raw.mfa ? { mfa: raw.mfa } : {}),
     auditLog: raw.auditLog ?? '-',
     auditRetentionDays: raw.auditRetentionDays ?? 400,
   };
+}
+
+// The MFA policy when the config does not say. A database created by v0.2 or
+// later uses "required"; one upgraded from v0.1 keeps working as before
+// ("optional") so an upgrade does not suddenly send everyone through setup.
+export function resolveMfaPolicy(config: Pick<MamoriConfig, 'mfa'>, createdBy: string | undefined): { policy: 'optional' | 'required'; warning?: string } {
+  if (config.mfa) {
+    if (config.mfa !== 'optional' && config.mfa !== 'required') throw new Error('"mfa" must be "optional" or "required"');
+    return { policy: config.mfa };
+  }
+  if (createdBy === 'v0.1') {
+    return { policy: 'optional', warning: 'mfa is not set in the config; using "optional" because this database came from v0.1. Set "mfa": "required" to require a second factor.' };
+  }
+  return { policy: 'required' };
 }

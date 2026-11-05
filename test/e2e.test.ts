@@ -79,6 +79,7 @@ async function startLogin(browser: Browser, config: client.Configuration, scope 
 }
 
 const sleeps: number[] = [];
+let mfaPolicy: 'optional' | 'required' = 'optional';
 const auditLines: string[] = [];
 const events = (): AuditRecord[] => auditLines.map((l) => JSON.parse(l) as AuditRecord);
 
@@ -111,7 +112,7 @@ beforeAll(async () => {
   const recovery = new RecoveryCodes(db);
   const now = () => Math.floor(Date.now() / 1000);
   const account = consoleHandler({ provider, users, sessions: new ConsoleSessions(db, testBox, now), recovery, audit, issuer, totpIssuer: 'mamori-test' });
-  handler = createRequestHandler(provider, users, { audit, recovery, console: account, sleep: async (seconds) => void sleeps.push(seconds) });
+  handler = createRequestHandler(provider, users, { audit, recovery, console: account, mfaPolicy: () => mfaPolicy, totpIssuer: 'mamori-test', sleep: async (seconds) => void sleeps.push(seconds) });
   const alice = await users.create({ email: 'alice@example.com', name: 'Alice', password: 'alice-password-1' });
   for (const name of ['engineering', 'all-staff']) groups.addMember(groups.create(name).id, alice.id);
   const carol = await users.create({ email: 'carol@example.com', name: 'Carol', password: 'carol-password' });
@@ -120,6 +121,7 @@ beforeAll(async () => {
   const bob = await users.create({ email: 'bob@example.com', name: 'Bob', password: 'bob-password-12' });
   users.setTotpSecret(bob.id, totpSecret);
   await users.create({ email: 'frank@example.com', name: 'Frank', password: 'frank-password-1' });
+  await users.create({ email: 'hana@example.com', name: 'Hana', password: 'hana-password-1' });
   const gina = await users.create({ email: 'gina@example.com', name: 'Gina', password: 'gina-password-1' });
   users.setTotpSecret(gina.id, ginaSecret);
   const erin = await users.create({ email: 'erin@example.com', name: 'Erin', password: 'erin-password-1' });
@@ -165,7 +167,7 @@ describe('sign-in with authorization code + PKCE', () => {
     const done = await browser.go(formAction(wrong.body), { method: 'POST', form: { code } });
     expect(done.url.startsWith(REDIRECT_URI)).toBe(true);
     const tokens = await client.authorizationCodeGrant(config, new URL(done.url), { pkceCodeVerifier: verifier, expectedState: state });
-    expect(tokens.claims()!.amr).toEqual(['pwd', 'otp']);
+    expect(tokens.claims()!.amr).toEqual(['pwd', 'otp', 'mfa']);
   });
 
   it('rejects a wrong password without saying which part was wrong', async () => {
@@ -233,7 +235,7 @@ describe('sign-in with authorization code + PKCE', () => {
     const [failed, challenge, succeeded, token] = events();
     expect(failed).toMatchObject({ actor: { type: 'user', email: 'bob@example.com' }, client_id: 'app', ip: '127.0.0.1', reason: 'wrong_password' });
     expect(challenge).toMatchObject({ method: 'otp' });
-    expect(succeeded).toMatchObject({ amr: ['pwd', 'otp'], actor: { email: 'bob@example.com' } });
+    expect(succeeded).toMatchObject({ amr: ['pwd', 'otp', 'mfa'], actor: { email: 'bob@example.com' } });
     expect(token).toMatchObject({ token_type: 'access_token', client_id: 'app', scope: 'openid email profile' });
     expect(auditLines.join('\n')).not.toMatch(/not-the-password|bob-password-12|000001/);
     expect(auditLines.join('\n')).not.toContain(code);
@@ -273,6 +275,35 @@ function hidden(html: string, name: string): string {
   return m[1]!;
 }
 
+describe('MFA policy "required"', () => {
+  it('makes a user without a second factor set one up during sign-in', async () => {
+    mfaPolicy = 'required';
+    try {
+      const config = await discover();
+      const browser = new Browser();
+      const { page, verifier, state } = await startLogin(browser, config);
+      const setup = await browser.go(formAction(page.body), { method: 'POST', form: { email: 'hana@example.com', password: 'hana-password-1' } });
+      expect(setup.body).toContain('Set up two-step verification');
+      expect(setup.body).toContain('<svg');
+      const secret = /<code>([A-Z2-7 ]+)<\/code>/.exec(setup.body)![1]!.replace(/ /g, '');
+
+      const wrong = await browser.go(formAction(setup.body), { method: 'POST', form: { code: '000000' } });
+      expect(wrong.status).toBe(400);
+      expect(users.findByEmail('hana@example.com')!.totpSecret).toBeNull();
+
+      const code = generateTotp(decodeBase32(secret)!, Math.floor(Date.now() / 1000)).code;
+      const codesPage = await browser.go(formAction(wrong.body), { method: 'POST', form: { code } });
+      expect([...codesPage.body.matchAll(/<li>[A-Z0-9]{5}-[A-Z0-9]{5}<\/li>/g)]).toHaveLength(10);
+      const done = await browser.go(formAction(codesPage.body), { method: 'POST', form: {} });
+      const tokens = await client.authorizationCodeGrant(config, new URL(done.url), { pkceCodeVerifier: verifier, expectedState: state });
+      expect(tokens.claims()!.amr).toEqual(['pwd', 'otp', 'mfa']);
+      expect(users.findByEmail('hana@example.com')!.totpSecret).toBe(secret);
+    } finally {
+      mfaPolicy = 'optional';
+    }
+  });
+});
+
 describe('account page', () => {
   const at = (path: string) => new URL(path, issuer).toString();
 
@@ -311,7 +342,7 @@ describe('account page', () => {
       const res = await app.go(formAction(ask.body), { method: 'POST', form: { code: codes[0]!.toLowerCase() } });
       if (expected === 'ok') {
         const tokens = await client.authorizationCodeGrant(config, new URL(res.url), { pkceCodeVerifier: verifier, expectedState: state });
-        expect(tokens.claims()!.amr).toEqual(['pwd', 'otp']);
+        expect(tokens.claims()!.amr).toEqual(['pwd', 'otp', 'mfa']);
       } else {
         expect(res.status).toBe(401);
       }

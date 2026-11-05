@@ -11,7 +11,8 @@ See [docs/design.md](docs/design.md) for the scope and roadmap.
 ## What works today
 
 - OpenID Connect provider with the authorization code flow. PKCE (S256) is required for every client.
-- Sign-in with email and password, plus TOTP for users who have it set up. The ID token's `amr` says which (`["pwd"]` or `["pwd", "otp"]`).
+- Sign-in with email and password, plus TOTP for users who have it set up. The ID token's `amr` says which (`["pwd"]`, or `["pwd", "otp", "mfa"]` when a second factor was used; check for `mfa`).
+- MFA policy: with `"mfa": "required"` (the default for new installs), a user without a second factor sets up an authenticator app and saves recovery codes during sign-in, and cannot skip it. Databases upgraded from v0.1 default to `"optional"` and log a warning.
 - Failed sign-ins are throttled: an IP is refused for an email after 10 failures in 15 minutes, and every failure after the fifth slows down further attempts for that email. The account itself is never locked. Disabled users cannot sign in, and disabling a user signs them out of every app.
 - Passwords are hashed with scrypt. TOTP secrets, which the server has to read back and so cannot hash, are encrypted with AES-256-GCM using a key in a separate file (`mamori.key`, created on first start). Signing keys and cookie keys are generated on first start and kept in the SQLite file.
 - Account page at `/account`: people set up an authenticator app themselves (QR code, confirmed with a code), remove it (only with a current code) and make recovery codes, ten one-time codes shown once and stored as keyed hashes. A recovery code works in place of the TOTP code when signing in. The page signs in through mamori's own OpenID Connect flow as the built-in `mamori-console` client; its session ends after 30 idle minutes or 8 hours, and every form carries a CSRF token.

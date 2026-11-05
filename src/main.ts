@@ -1,4 +1,4 @@
-import { loadConfig } from './config.js';
+import { loadConfig, resolveMfaPolicy } from './config.js';
 import { createProvider } from './oidc/provider.js';
 import { createMamoriServer } from './server.js';
 import { openDatabase } from './store/db.js';
@@ -24,6 +24,9 @@ const now = () => Math.floor(Date.now() / 1000);
 const sessions = new ConsoleSessions(db, box, now);
 const recovery = new RecoveryCodes(db);
 const trustProxy = config.trustProxy ?? false;
+const createdBy = (db.prepare("SELECT value FROM settings WHERE key = 'created_by'").get() as { value: string } | undefined)?.value;
+const mfa = resolveMfaPolicy(config, createdBy);
+if (mfa.warning) console.warn(mfa.warning);
 const account = consoleHandler({ provider, users, sessions, recovery, audit, trustProxy, issuer: config.issuer, totpIssuer: config.totpIssuer });
 
 setInterval(() => {
@@ -32,6 +35,6 @@ setInterval(() => {
   audit.purge(config.auditRetentionDays);
 }, 60 * 60 * 1000).unref();
 
-createMamoriServer(provider, users, { audit, recovery, trustProxy, console: account }).listen(config.port, () => {
+createMamoriServer(provider, users, { audit, recovery, trustProxy, console: account, mfaPolicy: () => mfa.policy, totpIssuer: config.totpIssuer }).listen(config.port, () => {
   console.log(`mamori listening on :${config.port}, issuer ${config.issuer}`);
 });

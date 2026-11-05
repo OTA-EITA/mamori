@@ -5,7 +5,7 @@ import { interactionHandler, type InteractionOptions } from './oidc/interactions
 import { errorPage } from './oidc/pages.js';
 import { CALLBACK_PATH } from './console/console.js';
 
-const INTERACTION = /^\/interaction\/([\w-]+)(?:\/(login|totp))?$/;
+const INTERACTION = /^\/interaction\/([\w-]+)(?:\/(login|totp|setup|continue))?$/;
 
 export interface RequestHandlerOptions extends InteractionOptions {
   console?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;

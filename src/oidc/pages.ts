@@ -15,6 +15,9 @@ function page(title: string, body: string): string {
   input { width: 100%; box-sizing: border-box; padding: .6rem; margin-top: .3rem; font-size: 1rem; }
   button { width: 100%; margin-top: 1.5rem; padding: .7rem; font-size: 1rem; }
   .error { color: #b00020; }
+  .muted { color: #5f6368; font-size: .9rem; }
+  .qr svg { width: 12rem; height: 12rem; }
+  code, .codes { font-family: ui-monospace, monospace; }
 </style>
 </head>
 <body><main>${body}</main></body>
@@ -44,6 +47,38 @@ ${opts.error ? `<p class="error">${escape(opts.error)}</p>` : ''}
 <form method="post" action="/interaction/${escape(uid)}/totp">
   <label>Code<input name="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required autofocus></label>
   <button type="submit">Verify</button>
+</form>`,
+  );
+}
+
+export function mfaSetupPage(uid: string, opts: { qrSvg: string; secret: string; error?: string }): string {
+  const grouped = opts.secret.match(/.{1,4}/g)!.join(' ');
+  return page(
+    'Set up two-step verification',
+    `<h1>Set up two-step verification</h1>
+<p>Your organization requires a second step when you sign in. Scan this code with Google Authenticator, Microsoft Authenticator or a similar app.</p>
+<div class="qr">${opts.qrSvg}</div>
+<p class="muted">Cannot scan it? Enter this key in the app instead:<br><code>${escape(grouped)}</code></p>
+${opts.error ? `<p class="error">${escape(opts.error)}</p>` : ''}
+<form method="post" action="/interaction/${escape(uid)}/setup">
+  <label>Then enter the 6-digit code the app shows<input name="code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" required autofocus></label>
+  <button type="submit">Turn on</button>
+</form>`,
+  );
+}
+
+export function mfaSetupDonePage(uid: string, opts: { codes: string[] }): string {
+  return page(
+    'Recovery codes',
+    `<h1>Two-step verification is on</h1>
+${
+  opts.codes.length
+    ? `<p>If you lose your phone, sign in with one of these recovery codes instead. Keep them somewhere safe, such as a password manager. They are shown only now, and each works once.</p>
+<ol class="codes">${opts.codes.map((c) => `<li>${escape(c)}</li>`).join('')}</ol>`
+    : ''
+}
+<form method="post" action="/interaction/${escape(uid)}/continue">
+  <button type="submit">I saved them, continue</button>
 </form>`,
   );
 }
