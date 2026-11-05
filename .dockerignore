@@ -1,0 +1,14 @@
+node_modules
+dist
+coverage
+test
+docs
+.git
+.github
+*.db
+*.db-*
+mamori.key
+mamori.config.json
+*.json.bak
+google-service-account.json
+slack-scim-token

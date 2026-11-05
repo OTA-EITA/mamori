@@ -6,7 +6,7 @@ mamori runs as one Node.js process with one SQLite file. It builds on the OpenID
 
 **Status: early development.** Not ready for production use.
 
-See [docs/design.md](docs/design.md) for the scope and roadmap.
+See [docs/design.md](docs/design.md) for the scope and roadmap, [CHANGELOG.md](CHANGELOG.md) for what changed, and [SECURITY.md](SECURITY.md) to report a vulnerability. Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## What works today
 
@@ -43,6 +43,17 @@ Put mamori behind a reverse proxy that terminates TLS, and set `"trustProxy": tr
 Back up `mamori.key` separately from the database: without it the TOTP secrets cannot be read, and with it next to a database copy they can. Set `"encryptionKeyFile"` to keep it somewhere else. Secrets stored as plain text by earlier versions are encrypted at the next start.
 
 The audit log goes to stdout unless `"auditLog"` is set to a file path or `"off"`.
+
+## Running with Docker
+
+```sh
+docker build -t mamori .
+mkdir data && cp mamori.config.example.json data/mamori.config.json   # set issuer and clients
+docker run -d --name mamori -p 3000:3000 -v "$PWD/data:/data" mamori
+docker exec -i mamori node /app/dist/cli.js user add alice@example.co.jp "Alice" <<< 'a-long-password'
+```
+
+Everything mamori keeps is in `/data`: the config, the SQLite database, the encryption key `mamori.key` and connector credentials. Relative paths in the config are relative to `/data`. The container runs as the unprivileged `node` user (uid 1000), so make the directory writable for it. Back up the database and the key separately.
 
 ## Development
 

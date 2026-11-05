@@ -39,3 +39,25 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the image
+        run: docker build -t mamori:ci .
+
+      # Start it with a minimal config and wait for the health check.
+      - name: Start and check /healthz
+        run: |
+          mkdir -p data
+          printf '{"issuer":"http://localhost:3000","clients":[]}' > data/mamori.config.json
+          sudo chown -R 1000:1000 data
+          docker run -d --name mamori -p 3000:3000 -v "$PWD/data:/data" mamori:ci
+          for i in $(seq 1 30); do curl -fsS http://localhost:3000/healthz && exit 0; sleep 1; done
+          docker logs mamori
+          exit 1
