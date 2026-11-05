@@ -10,6 +10,7 @@ const INTERACTION = /^\/interaction\/([\w-]+)(?:\/(login|totp|setup|continue|pas
 
 export interface RequestHandlerOptions extends InteractionOptions {
   console?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+  scim?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 }
 
 export function createRequestHandler(provider: Provider, users: UserStore, opts: RequestHandlerOptions = {}) {
@@ -20,6 +21,13 @@ export function createRequestHandler(provider: Provider, users: UserStore, opts:
     if (path === '/assets/passkey.js') {
       res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=3600', 'x-content-type-options': 'nosniff' });
       res.end(PASSKEY_SCRIPT);
+      return;
+    }
+    if (opts.scim && path.startsWith('/scim/v2/')) {
+      opts.scim(req, res).catch(() => {
+        if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/scim+json' });
+        res.end(JSON.stringify({ schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], status: '500', detail: 'Internal error.' }));
+      });
       return;
     }
     if (path === '/healthz') {

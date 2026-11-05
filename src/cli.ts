@@ -5,6 +5,7 @@ import { UserStore } from './store/users.js';
 import { AuditLog } from './audit/audit.js';
 import { SecretBox } from './store/secretBox.js';
 import { GroupStore } from './store/groups.js';
+import { ScimTokens } from './scim/tokens.js';
 import { buildOtpauthUri, generateTotpSecret } from './totp/base32.js';
 
 const USAGE = `usage:
@@ -14,6 +15,9 @@ const USAGE = `usage:
   mamori-admin user make-admin <email>      (admin pages also need a second factor)
   mamori-admin totp enroll <email>          (prints an otpauth:// URI to scan)
   mamori-admin totp remove <email>
+  mamori-admin scim token create <name>     (prints the token once)
+  mamori-admin scim token list
+  mamori-admin scim token revoke <id>
   mamori-admin group add <name> [description]
   mamori-admin group list
   mamori-admin group members <name>
@@ -41,6 +45,31 @@ async function main(argv: string[]): Promise<number> {
   const cli = { type: 'cli' as const };
   const [group, command, email, ...rest] = argv;
 
+  if (group === 'scim' && command === 'token') {
+    const tokens = new ScimTokens(db);
+    const [action, ...args] = [email, ...rest];
+    if (action === 'create' && args.length) {
+      const { token, id } = tokens.create(args.join(' '));
+      audit.write({ event: 'scim_token.created', actor: cli, token_id: id, token_name: args.join(' ') });
+      console.log(token);
+      return 0;
+    }
+    if (action === 'list') {
+      for (const t of tokens.list()) console.log(`${t.id}\t${t.name}\tcreated ${t.createdAt}\tlast used ${t.lastUsedAt ?? 'never'}`);
+      return 0;
+    }
+    if (action === 'revoke' && args[0]) {
+      if (!tokens.revoke(args[0])) {
+        console.error(`no token ${args[0]}`);
+        return 1;
+      }
+      audit.write({ event: 'scim_token.revoked', actor: cli, token_id: args[0] });
+      console.log(`revoked ${args[0]}`);
+      return 0;
+    }
+    console.error(USAGE);
+    return 1;
+  }
   if (group === 'group') return groupCommand(new GroupStore(db), users, audit, command, email, rest);
   const user = email ? users.findByEmail(email) : undefined;
 

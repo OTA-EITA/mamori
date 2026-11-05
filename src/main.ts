@@ -11,6 +11,8 @@ import { consoleHandler } from './console/console.js';
 import { RecoveryCodes } from './console/recovery.js';
 import { ConsoleSessions } from './console/sessions.js';
 import { SetupLinks } from './console/setupLinks.js';
+import { scimHandler } from './scim/scim.js';
+import { ScimTokens } from './scim/tokens.js';
 import { PasskeyStore } from './store/passkeys.js';
 import { WebAuthn } from './passkeys/webauthn.js';
 
@@ -41,6 +43,8 @@ setInterval(() => {
   audit.purge(config.auditRetentionDays);
 }, 60 * 60 * 1000).unref();
 
-createMamoriServer(provider, users, { audit, recovery, trustProxy, console: account, mfaPolicy: () => mfa.policy, totpIssuer: config.totpIssuer, passkeys, webauthn }).listen(config.port, () => {
+const scim = scimHandler({ users, groups, tokens: new ScimTokens(db), audit, trustProxy, issuer: config.issuer });
+
+createMamoriServer(provider, users, { audit, recovery, trustProxy, console: account, scim, mfaPolicy: () => mfa.policy, totpIssuer: config.totpIssuer, passkeys, webauthn }).listen(config.port, () => {
   console.log(`mamori listening on :${config.port}, issuer ${config.issuer}`);
 });

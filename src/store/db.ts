@@ -117,6 +117,22 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX setup_links_user ON setup_links (user_id);
   `,
+  // 7: SCIM (inbound provisioning): tokens, the client's own ids, and users
+  // deleted through SCIM, who are kept for the audit log but hidden from SCIM.
+  `
+  CREATE TABLE scim_tokens (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+  );
+  ALTER TABLE users ADD COLUMN external_id TEXT;
+  ALTER TABLE users ADD COLUMN deleted_at TEXT;
+  ALTER TABLE users ADD COLUMN updated_at TEXT;
+  CREATE INDEX users_external_id ON users (external_id);
+  ALTER TABLE groups ADD COLUMN external_id TEXT;
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

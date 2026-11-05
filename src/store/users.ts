@@ -13,6 +13,12 @@ export interface User {
   disabled: boolean;
   isAdmin: boolean;
   lastSignInAt: string | null;
+  createdAt: string;
+  updatedAt: string | null;
+  // Set by a SCIM client for its own matching.
+  externalId: string | null;
+  // Deleted through SCIM: disabled and hidden from SCIM, kept for the audit log.
+  deletedAt: string | null;
 }
 
 interface UserRow {
@@ -25,6 +31,10 @@ interface UserRow {
   disabled: number;
   is_admin: number;
   last_sign_in_at: string | null;
+  created_at: string;
+  updated_at: string | null;
+  external_id: string | null;
+  deleted_at: string | null;
 }
 
 function toUser(row: UserRow, box: SecretBox): User {
@@ -37,6 +47,10 @@ function toUser(row: UserRow, box: SecretBox): User {
     disabled: row.disabled === 1,
     isAdmin: row.is_admin === 1,
     lastSignInAt: row.last_sign_in_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    externalId: row.external_id,
+    deletedAt: row.deleted_at,
   };
 }
 
@@ -111,6 +125,33 @@ export class UserStore {
       .prepare("SELECT * FROM users WHERE email LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' ORDER BY email LIMIT 500")
       .all(like, like) as unknown as UserRow[];
     return rows.map((r) => toUser(r, this.box));
+  }
+
+  // Changes the given fields. Email changes keep the id, so apps keep the same `sub`.
+  updateProfile(id: string, changes: { email?: string; name?: string; externalId?: string | null }): void {
+    const now = new Date().toISOString();
+    if (changes.email !== undefined) this.db.prepare('UPDATE users SET email = ?, updated_at = ? WHERE id = ?').run(changes.email, now, id);
+    if (changes.name !== undefined) this.db.prepare('UPDATE users SET name = ?, updated_at = ? WHERE id = ?').run(changes.name, now, id);
+    if (changes.externalId !== undefined) this.db.prepare('UPDATE users SET external_id = ?, updated_at = ? WHERE id = ?').run(changes.externalId, now, id);
+  }
+
+  // SCIM DELETE: disable, sign out everywhere, and hide from SCIM.
+  markDeleted(id: string): void {
+    this.setDisabled(id, true);
+    this.db.prepare('UPDATE users SET deleted_at = ?, updated_at = ? WHERE id = ?').run(new Date().toISOString(), new Date().toISOString(), id);
+  }
+
+  // Users that SCIM can see, matching every given field exactly
+  // (email case-insensitively).
+  scimList(filter: { email?: string; externalId?: string }, offset: number, limit: number): { total: number; users: User[] } {
+    const where = ['deleted_at IS NULL'];
+    const args: string[] = [];
+    if (filter.email !== undefined) (where.push('email = ? COLLATE NOCASE'), args.push(filter.email));
+    if (filter.externalId !== undefined) (where.push('external_id = ?'), args.push(filter.externalId));
+    const clause = where.join(' AND ');
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS n FROM users WHERE ${clause}`).get(...args) as { n: number }).n);
+    const rows = this.db.prepare(`SELECT * FROM users WHERE ${clause} ORDER BY created_at, id LIMIT ? OFFSET ?`).all(...args, limit, offset) as unknown as UserRow[];
+    return { total, users: rows.map((r) => toUser(r, this.box)) };
   }
 
   countAdmins(): number {
