@@ -3,6 +3,10 @@ import { openDatabase } from './db.js';
 import { deleteExpired, SqliteAdapter } from './oidcAdapter.js';
 import { hashPassword, verifyPassword } from './password.js';
 import { UserStore } from './users.js';
+import { SecretBox } from './secretBox.js';
+import { randomBytes } from 'node:crypto';
+
+const testBox = new SecretBox(randomBytes(32));
 
 describe('passwords', () => {
   it('verifies the right password and rejects others', async () => {
@@ -20,7 +24,7 @@ describe('passwords', () => {
 
 describe('UserStore', () => {
   it('creates users and authenticates them by email, case-insensitively', async () => {
-    const users = new UserStore(openDatabase(':memory:'));
+    const users = new UserStore(openDatabase(':memory:'), testBox);
     const alice = await users.create({ email: 'alice@example.com', name: 'Alice', password: 'pw-alice' });
     expect(users.findByEmail('ALICE@example.com')?.id).toBe(alice.id);
     expect((await users.authenticate('Alice@Example.com', 'pw-alice'))?.id).toBe(alice.id);
@@ -29,20 +33,20 @@ describe('UserStore', () => {
   });
 
   it('rejects duplicate emails', async () => {
-    const users = new UserStore(openDatabase(':memory:'));
+    const users = new UserStore(openDatabase(':memory:'), testBox);
     await users.create({ email: 'a@example.com', name: 'A', password: 'x' });
     await expect(users.create({ email: 'A@example.com', name: 'A2', password: 'y' })).rejects.toThrow();
   });
 
   it('refuses disabled users even with the right password', async () => {
-    const users = new UserStore(openDatabase(':memory:'));
+    const users = new UserStore(openDatabase(':memory:'), testBox);
     const bob = await users.create({ email: 'bob@example.com', name: 'Bob', password: 'pw-bob' });
     users.setDisabled(bob.id, true);
     expect(await users.authenticate('bob@example.com', 'pw-bob')).toBeUndefined();
   });
 
   it('resets the last used TOTP counter when the secret changes', async () => {
-    const users = new UserStore(openDatabase(':memory:'));
+    const users = new UserStore(openDatabase(':memory:'), testBox);
     const u = await users.create({ email: 'c@example.com', name: 'C', password: 'x' });
     users.setTotpSecret(u.id, 'JBSWY3DPEHPK3PXP');
     users.setTotpLastCounter(u.id, 42);

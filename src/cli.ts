@@ -3,6 +3,7 @@ import { loadConfig } from './config.js';
 import { openDatabase } from './store/db.js';
 import { UserStore } from './store/users.js';
 import { AuditLog } from './audit/audit.js';
+import { SecretBox } from './store/secretBox.js';
 import { buildOtpauthUri, generateTotpSecret } from './totp/base32.js';
 
 const USAGE = `usage:
@@ -24,7 +25,8 @@ async function readPassword(): Promise<string> {
 async function main(argv: string[]): Promise<number> {
   const config = loadConfig(process.env.MAMORI_CONFIG ?? 'mamori.config.json');
   const db = openDatabase(config.database);
-  const users = new UserStore(db);
+  const users = new UserStore(db, SecretBox.fromKeyFile(config.encryptionKeyFile));
+  users.sealPlaintextSecrets();
   // CLI actions go to the audit table; the JSON line goes to the configured
   // output too, except stdout, which is for the command's own result.
   const audit = new AuditLog(db, { output: config.auditLog === '-' ? 'off' : config.auditLog });

@@ -12,6 +12,9 @@ export interface MamoriConfig {
   // Name shown in authenticator apps next to the account.
   totpIssuer: string;
   clients: ClientMetadata[];
+  // Key that seals TOTP secrets in the database. Created on first start.
+  // Keep it out of database backups, and back it up separately.
+  encryptionKeyFile: string;
   // Audit log lines: "-" for stdout, "off", or a file path.
   auditLog: string;
   // Audit rows older than this are deleted by the hourly cleanup.
@@ -28,6 +31,7 @@ export function loadConfig(path: string): MamoriConfig {
     database: raw.database ?? 'mamori.db',
     totpIssuer: raw.totpIssuer ?? new URL(raw.issuer).hostname,
     clients: raw.clients ?? [],
+    encryptionKeyFile: raw.encryptionKeyFile ?? 'mamori.key',
     auditLog: raw.auditLog ?? '-',
     auditRetentionDays: raw.auditRetentionDays ?? 400,
   };

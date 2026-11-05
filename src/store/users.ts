@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { revokeAccount } from './oidcAdapter.js';
 import { hashPassword, verifyPassword } from './password.js';
+import { SecretBox } from './secretBox.js';
 
 export interface User {
   id: string;
@@ -26,12 +27,12 @@ interface UserRow {
   last_sign_in_at: string | null;
 }
 
-function toUser(row: UserRow): User {
+function toUser(row: UserRow, box: SecretBox): User {
   return {
     id: row.id,
     email: row.email,
     name: row.name,
-    totpSecret: row.totp_secret,
+    totpSecret: row.totp_secret === null ? null : box.open(row.totp_secret),
     totpLastCounter: row.totp_last_counter,
     disabled: row.disabled === 1,
     isAdmin: row.is_admin === 1,
@@ -40,7 +41,24 @@ function toUser(row: UserRow): User {
 }
 
 export class UserStore {
-  constructor(private readonly db: DatabaseSync) {}
+  // TOTP secrets are stored sealed with this box and opened when read.
+  constructor(
+    private readonly db: DatabaseSync,
+    private readonly box: SecretBox,
+  ) {}
+
+  // Seals TOTP secrets written by versions that stored them as plain text.
+  // Runs at every start; returns how many were sealed.
+  sealPlaintextSecrets(): number {
+    const rows = this.db.prepare('SELECT id, totp_secret FROM users WHERE totp_secret IS NOT NULL').all() as { id: string; totp_secret: string }[];
+    let sealed = 0;
+    for (const row of rows) {
+      if (SecretBox.isSealed(row.totp_secret)) continue;
+      this.db.prepare('UPDATE users SET totp_secret = ? WHERE id = ?').run(this.box.seal(row.totp_secret), row.id);
+      sealed++;
+    }
+    return sealed;
+  }
 
   async create(input: { email: string; name: string; password: string }): Promise<User> {
     const id = randomUUID();
@@ -52,12 +70,12 @@ export class UserStore {
 
   findById(id: string): User | undefined {
     const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
-    return row && toUser(row);
+    return row && toUser(row, this.box);
   }
 
   findByEmail(email: string): User | undefined {
     const row = this.db.prepare('SELECT * FROM users WHERE email = ?').get(email) as UserRow | undefined;
-    return row && toUser(row);
+    return row && toUser(row, this.box);
   }
 
   // Returns the user only when the password matches and the account is enabled.
@@ -67,11 +85,11 @@ export class UserStore {
     const row = this.db.prepare('SELECT * FROM users WHERE email = ?').get(email) as UserRow | undefined;
     const ok = await verifyPassword(password, row?.password_hash ?? (await dummyHash));
     if (!row || !ok || row.disabled === 1) return undefined;
-    return toUser(row);
+    return toUser(row, this.box);
   }
 
   setTotpSecret(id: string, secret: string | null): void {
-    this.db.prepare('UPDATE users SET totp_secret = ?, totp_last_counter = NULL WHERE id = ?').run(secret, id);
+    this.db.prepare('UPDATE users SET totp_secret = ?, totp_last_counter = NULL WHERE id = ?').run(secret === null ? null : this.box.seal(secret), id);
   }
 
   setLastSignIn(id: string, at: Date): void {

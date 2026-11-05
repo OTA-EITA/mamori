@@ -6,6 +6,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { openDatabase, SCHEMA_VERSION } from './db.js';
 import { revokeAccount, SqliteAdapter } from './oidcAdapter.js';
 import { UserStore } from './users.js';
+import { SecretBox } from './secretBox.js';
+import { randomBytes } from 'node:crypto';
+
+const testBox = new SecretBox(randomBytes(32));
 
 const dirs: string[] = [];
 const tempDb = () => {
@@ -41,7 +45,7 @@ describe('migrations', () => {
     old.close();
 
     const db = openDatabase(path);
-    expect(new UserStore(db).findById('u1')?.email).toBe('a@example.com');
+    expect(new UserStore(db, testBox).findById('u1')?.email).toBe('a@example.com');
     expect(db.prepare("SELECT account_id FROM oidc_models WHERE id = 's1'").get()).toEqual({ account_id: 'u1' });
     expect(db.prepare("SELECT value FROM settings WHERE key = 'created_by'").get()).toEqual({ value: 'v0.1' });
   });
@@ -74,7 +78,7 @@ describe('revoking an account', () => {
 
   it('happens when a user is disabled', async () => {
     const db = openDatabase(':memory:');
-    const users = new UserStore(db);
+    const users = new UserStore(db, testBox);
     const u = await users.create({ email: 'b@example.com', name: 'B', password: 'pw' });
     await new SqliteAdapter(db, 'Session').upsert('s1', { accountId: u.id });
     users.setDisabled(u.id, true);

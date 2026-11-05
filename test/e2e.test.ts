@@ -10,6 +10,10 @@ import { UserStore } from '../src/store/users.js';
 import { decodeBase32, generateTotpSecret } from '../src/totp/base32.js';
 import { generateTotp } from '../src/totp/totp.js';
 import { AuditLog, type AuditRecord } from '../src/audit/audit.js';
+import { SecretBox } from '../src/store/secretBox.js';
+import { randomBytes } from 'node:crypto';
+
+const testBox = new SecretBox(randomBytes(32));
 
 const REDIRECT_URI = 'http://127.0.0.1:9/callback';
 
@@ -75,7 +79,7 @@ const events = (): AuditRecord[] => auditLines.map((l) => JSON.parse(l) as Audit
 
 beforeAll(async () => {
   const db = openDatabase(':memory:');
-  users = new UserStore(db);
+  users = new UserStore(db, testBox);
   const audit = new AuditLog(db, { sink: (line) => auditLines.push(line) });
   let handler: ReturnType<typeof createRequestHandler> | undefined;
   server = createServer((req, res) => handler!(req, res));
@@ -87,6 +91,7 @@ beforeAll(async () => {
       port: 0,
       database: ':memory:',
       totpIssuer: 'mamori-test',
+      encryptionKeyFile: '',
       auditLog: 'off',
       auditRetentionDays: 400,
       clients: [{ client_id: 'app', client_secret: 'app-secret', redirect_uris: [REDIRECT_URI], client_name: 'Test App' }],

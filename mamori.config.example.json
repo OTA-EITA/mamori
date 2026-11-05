@@ -4,6 +4,7 @@
   "trustProxy": true,
   "database": "mamori.db",
   "totpIssuer": "Example Co",
+  "encryptionKeyFile": "mamori.key",
   "auditLog": "-",
   "auditRetentionDays": 400,
   "clients": [
