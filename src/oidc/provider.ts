@@ -5,9 +5,10 @@ import type { MamoriConfig } from '../config.js';
 import { SqliteAdapter } from '../store/oidcAdapter.js';
 import type { UserStore } from '../store/users.js';
 import type { AuditLog } from '../audit/audit.js';
+import type { GroupStore } from '../store/groups.js';
 import { cookieKeys, signingJwks } from './keys.js';
 
-export function createProvider(config: MamoriConfig, db: DatabaseSync, users: UserStore, audit?: AuditLog): Provider {
+export function createProvider(config: MamoriConfig, db: DatabaseSync, users: UserStore, audit?: AuditLog, groups?: GroupStore): Provider {
   const configuration: Configuration = {
     adapter: (name: string) => new SqliteAdapter(db, name),
     clients: config.clients,
@@ -15,8 +16,8 @@ export function createProvider(config: MamoriConfig, db: DatabaseSync, users: Us
     cookies: { keys: cookieKeys(db) },
     // Require PKCE for every client, not only public ones.
     pkce: { required: () => true },
-    scopes: ['openid', 'email', 'profile', 'offline_access'],
-    claims: { openid: ['sub', 'amr'], email: ['email', 'email_verified'], profile: ['name'] },
+    scopes: ['openid', 'email', 'profile', 'groups', 'offline_access'],
+    claims: { openid: ['sub', 'amr'], email: ['email', 'email_verified'], profile: ['name'], groups: ['groups'] },
     // Many SaaS apps read the email from the ID token instead of calling
     // userinfo, so put the claims of the granted scopes in the ID token too.
     conformIdTokenClaims: false,
@@ -29,7 +30,7 @@ export function createProvider(config: MamoriConfig, db: DatabaseSync, users: Us
       return {
         accountId: user.id,
         async claims() {
-          return { sub: user.id, email: user.email, email_verified: true, name: user.name };
+          return { sub: user.id, email: user.email, email_verified: true, name: user.name, groups: groups?.namesOf(user.id) ?? [] };
         },
       };
     },

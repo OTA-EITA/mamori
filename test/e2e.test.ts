@@ -10,6 +10,7 @@ import { UserStore } from '../src/store/users.js';
 import { decodeBase32, generateTotpSecret } from '../src/totp/base32.js';
 import { generateTotp } from '../src/totp/totp.js';
 import { AuditLog, type AuditRecord } from '../src/audit/audit.js';
+import { GroupStore } from '../src/store/groups.js';
 import { SecretBox } from '../src/store/secretBox.js';
 import { randomBytes } from 'node:crypto';
 
@@ -60,12 +61,12 @@ function formAction(html: string): string {
   return new URL(m[1]!, issuer).toString();
 }
 
-async function startLogin(browser: Browser, config: client.Configuration) {
+async function startLogin(browser: Browser, config: client.Configuration, scope = 'openid email profile') {
   const verifier = client.randomPKCECodeVerifier();
   const state = client.randomState();
   const url = client.buildAuthorizationUrl(config, {
     redirect_uri: REDIRECT_URI,
-    scope: 'openid email profile',
+    scope,
     code_challenge: await client.calculatePKCECodeChallenge(verifier),
     code_challenge_method: 'S256',
     state,
@@ -81,6 +82,7 @@ beforeAll(async () => {
   const db = openDatabase(':memory:');
   users = new UserStore(db, testBox);
   const audit = new AuditLog(db, { sink: (line) => auditLines.push(line) });
+  const groups = new GroupStore(db);
   let handler: ReturnType<typeof createRequestHandler> | undefined;
   server = createServer((req, res) => handler!(req, res));
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -99,10 +101,12 @@ beforeAll(async () => {
     db,
     users,
     audit,
+    groups,
   );
   // No real waiting for the throttling delays in tests; record them instead.
   handler = createRequestHandler(provider, users, { audit, sleep: async (seconds) => void sleeps.push(seconds) });
-  await users.create({ email: 'alice@example.com', name: 'Alice', password: 'alice-password-1' });
+  const alice = await users.create({ email: 'alice@example.com', name: 'Alice', password: 'alice-password-1' });
+  for (const name of ['engineering', 'all-staff']) groups.addMember(groups.create(name).id, alice.id);
   const carol = await users.create({ email: 'carol@example.com', name: 'Carol', password: 'carol-password' });
   users.setDisabled(carol.id, true);
   await users.create({ email: 'dave@example.com', name: 'Dave', password: 'dave-password-1' });
@@ -224,6 +228,23 @@ describe('sign-in with authorization code + PKCE', () => {
     expect(auditLines.join('\n')).not.toMatch(/not-the-password|bob-password-12|000001/);
     expect(auditLines.join('\n')).not.toContain(code);
     expect(users.findByEmail('bob@example.com')!.lastSignInAt).not.toBeNull();
+  });
+
+  it('puts the user’s groups in the ID token and userinfo when the app asks for them', async () => {
+    const config = await discover();
+    for (const [scope, expected] of [
+      ['openid email profile groups', ['all-staff', 'engineering']],
+      ['openid email profile', undefined],
+    ] as const) {
+      const browser = new Browser();
+      const { page, verifier, state } = await startLogin(browser, config, scope);
+      const done = await browser.go(formAction(page.body), { method: 'POST', form: { email: 'alice@example.com', password: 'alice-password-1' } });
+      const tokens = await client.authorizationCodeGrant(config, new URL(done.url), { pkceCodeVerifier: verifier, expectedState: state });
+      const claims = tokens.claims()!;
+      expect(claims.groups).toEqual(expected);
+      const info = await client.fetchUserInfo(config, tokens.access_token, claims.sub);
+      expect(info.groups).toEqual(expected);
+    }
   });
 
   it('refuses an authorization request without PKCE', async () => {

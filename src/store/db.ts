@@ -56,6 +56,20 @@ const MIGRATIONS: string[] = [
   CREATE INDEX audit_events_event ON audit_events (event, time);
   CREATE INDEX audit_events_actor ON audit_events (actor_id, time);
   `,
+  // 3: groups, for the `groups` claim.
+  `
+  CREATE TABLE groups (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    description TEXT NOT NULL DEFAULT ''
+  );
+  CREATE TABLE group_members (
+    group_id TEXT NOT NULL REFERENCES groups (id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, user_id)
+  );
+  CREATE INDEX group_members_user ON group_members (user_id);
+  `,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
