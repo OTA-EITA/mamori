@@ -101,13 +101,20 @@ export function interactionHandler(provider: Provider, users: UserStore, opts: I
         return send(res, 400, loginPage(uid, { client: clientName, error: 'Sign in again.' }));
       }
       const user = users.findById(pending.accountId);
+      const key = (user?.email ?? pending.accountId).toLowerCase();
+      // The same throttling as the password step. Without it, someone who has
+      // the password could try codes as fast as the server answers.
+      if (throttle.isLocked(key, ip)) {
+        pendingTotp.delete(uid);
+        return send(res, 429, loginPage(uid, { client: clientName, error: 'Too many failed attempts. Try again in 15 minutes.' }));
+      }
+      await sleep(throttle.delaySeconds(key));
       const secret = user?.totpSecret ? decodeBase32(user.totpSecret) : null;
       const form = await readForm(req);
       const result = secret
         ? verifyTotp(secret, (form.get('code') ?? '').trim(), now(), { ...(user!.totpLastCounter !== null ? { lastUsedCounter: user!.totpLastCounter } : {}) })
         : { ok: false };
       if (!user || !result.ok || result.counter === undefined) {
-        const key = (user?.email ?? pending.accountId).toLowerCase();
         throttle.fail(key, ip);
         if (throttle.isLocked(key, ip)) pendingTotp.delete(uid);
         return send(res, 401, totpPage(uid, { error: 'The code is not correct.' }));

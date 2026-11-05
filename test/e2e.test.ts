@@ -68,6 +68,8 @@ async function startLogin(browser: Browser, config: client.Configuration) {
   return { page: await browser.go(url.toString()), verifier, state };
 }
 
+const sleeps: number[] = [];
+
 beforeAll(async () => {
   const db = openDatabase(':memory:');
   users = new UserStore(db);
@@ -86,14 +88,16 @@ beforeAll(async () => {
     db,
     users,
   );
-  // No real waiting for the throttling delays in tests.
-  handler = createRequestHandler(provider, users, { sleep: async () => {} });
+  // No real waiting for the throttling delays in tests; record them instead.
+  handler = createRequestHandler(provider, users, { sleep: async (seconds) => void sleeps.push(seconds) });
   await users.create({ email: 'alice@example.com', name: 'Alice', password: 'alice-password-1' });
   const carol = await users.create({ email: 'carol@example.com', name: 'Carol', password: 'carol-password' });
   users.setDisabled(carol.id, true);
   await users.create({ email: 'dave@example.com', name: 'Dave', password: 'dave-password-1' });
   const bob = await users.create({ email: 'bob@example.com', name: 'Bob', password: 'bob-password-12' });
   users.setTotpSecret(bob.id, totpSecret);
+  const erin = await users.create({ email: 'erin@example.com', name: 'Erin', password: 'erin-password-1' });
+  users.setTotpSecret(erin.id, generateTotpSecret());
 });
 
 afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
@@ -165,6 +169,24 @@ describe('sign-in with authorization code + PKCE', () => {
     }
     const locked = await browser.go(formAction(page.body), { method: 'POST', form: { email: 'dave@example.com', password: 'dave-password-1' } });
     expect(locked.status).toBe(429);
+  });
+
+  it('slows down and then stops TOTP guesses the same way as password guesses', async () => {
+    const config = await discover();
+    const browser = new Browser();
+    const { page } = await startLogin(browser, config);
+    let res = await browser.go(formAction(page.body), { method: 'POST', form: { email: 'erin@example.com', password: 'erin-password-1' } });
+    expect(res.body).toContain('Verification code');
+    sleeps.length = 0;
+    for (let i = 0; i < 10; i++) {
+      res = await browser.go(formAction(res.body), { method: 'POST', form: { code: 'wrong!' } });
+      expect(res.status).toBe(401);
+    }
+    // Each failure after the fifth doubles the delay before the next answer.
+    expect(sleeps).toEqual([0, 0, 0, 0, 0, 0, 1, 2, 4, 8]);
+    // The tenth failure locks this IP out for this email, including the password step.
+    const again = await browser.go(formAction(page.body), { method: 'POST', form: { email: 'erin@example.com', password: 'erin-password-1' } });
+    expect(again.status).toBe(429);
   });
 
   it('refuses an authorization request without PKCE', async () => {
