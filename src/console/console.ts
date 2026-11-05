@@ -15,7 +15,7 @@ import { buildOtpauthUri, decodeBase32, generateTotpSecret } from '../totp/base3
 import { verifyTotp } from '../totp/totp.js';
 import { accountPage, recoveryCodesPage, setupLinkInvalidPage, setupPage, signedOutPage, totpSetupPage } from './pages.js';
 import type { SetupLinks } from './setupLinks.js';
-import { adminAuditPage, adminDeniedPage, adminGroupPage, adminGroupsPage, adminNewUserPage, adminSetupLinkPage, adminUserPage, adminUsersPage, type UserRowView } from './adminPages.js';
+import { adminAuditPage, adminProvisioningPage, adminDeniedPage, adminGroupPage, adminGroupsPage, adminNewUserPage, adminSetupLinkPage, adminUserPage, adminUsersPage, type UserRowView } from './adminPages.js';
 import { randomBytes as randomPassword } from 'node:crypto';
 import type { GroupStore } from '../store/groups.js';
 import type { User } from '../store/users.js';
@@ -60,6 +60,7 @@ export interface ConsoleDeps {
   webauthn?: WebAuthn;
   groups?: GroupStore;
   setupLinks?: SetupLinks;
+  provisioning?: { connectorNames: string[]; connectorGroups(): { name: string; group: string }[]; jobs(): ReturnType<import('../provisioning/engine.js').Provisioning['jobs']> };
 }
 
 const pkceChallenge = (verifier: string) => createHash('sha256').update(verifier).digest('base64url');
@@ -181,6 +182,10 @@ export function consoleHandler(deps: ConsoleDeps) {
       log('user.created', created);
       return linkFor(created, true);
     }
+    if (path === '/admin/provisioning' && req.method === 'GET') {
+      return send(res, 200, adminProvisioningPage({ connectors: deps.provisioning?.connectorGroups() ?? [], jobs: deps.provisioning?.jobs() ?? [] }));
+    }
+
     if (path === '/admin/audit' && req.method === 'GET') {
       const filter = { event: url.searchParams.get('event') ?? '', user: url.searchParams.get('user') ?? '', since: url.searchParams.get('since') ?? '', until: url.searchParams.get('until') ?? '' };
       const isDay = (d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d);

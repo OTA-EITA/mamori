@@ -6,6 +6,8 @@ import { AuditLog } from './audit/audit.js';
 import { SecretBox } from './store/secretBox.js';
 import { GroupStore } from './store/groups.js';
 import { ScimTokens } from './scim/tokens.js';
+import { Provisioning } from './provisioning/engine.js';
+import { connectorsFromConfig } from './provisioning/fromConfig.js';
 import { buildOtpauthUri, generateTotpSecret } from './totp/base32.js';
 
 const USAGE = `usage:
@@ -18,6 +20,8 @@ const USAGE = `usage:
   mamori-admin scim token create <name>     (prints the token once)
   mamori-admin scim token list
   mamori-admin scim token revoke <id>
+  mamori-admin provision status
+  mamori-admin provision reconcile <connector> [--apply]
   mamori-admin group add <name> [description]
   mamori-admin group list
   mamori-admin group members <name>
@@ -44,6 +48,24 @@ async function main(argv: string[]): Promise<number> {
   const audit = new AuditLog(db, { output: config.auditLog === '-' ? 'off' : config.auditLog });
   const cli = { type: 'cli' as const };
   const [group, command, email, ...rest] = argv;
+  // Changes made here queue provisioning jobs; the running server sends them.
+  const groupStore = new GroupStore(db);
+  const provisioning = new Provisioning(db, users, groupStore, connectorsFromConfig(config.connectors), () => Math.floor(Date.now() / 1000), audit);
+  users.onChange((id) => provisioning.userChanged(id));
+  groupStore.onMembershipChange((id) => provisioning.userChanged(id));
+
+  if (group === 'provision' && command === 'status') {
+    for (const c of provisioning.connectorGroups()) console.log(`${c.name}\tgroup ${c.group}`);
+    for (const j of provisioning.jobs()) console.log(`${j.connector}\t${j.email ?? j.userId}\t${j.failed ? 'gave up' : `attempts ${j.attempts}`}\t${j.lastError ?? ''}`);
+    return 0;
+  }
+  if (group === 'provision' && command === 'reconcile' && email) {
+    const apply = rest.includes('--apply');
+    const plan = await provisioning.reconcile(email, apply);
+    for (const p of plan) console.log(`${p.plan.action}\t${p.email}\t${p.plan.reason}`);
+    console.log(plan.length ? (apply ? `queued ${plan.length} change(s); the server sends them` : `${plan.length} difference(s); run again with --apply to queue them`) : 'in sync');
+    return 0;
+  }
 
   if (group === 'scim' && command === 'token') {
     const tokens = new ScimTokens(db);
@@ -70,7 +92,7 @@ async function main(argv: string[]): Promise<number> {
     console.error(USAGE);
     return 1;
   }
-  if (group === 'group') return groupCommand(new GroupStore(db), users, audit, command, email, rest);
+  if (group === 'group') return groupCommand(groupStore, users, audit, command, email, rest);
   const user = email ? users.findByEmail(email) : undefined;
 
   if (group === 'user' && command === 'add' && email && rest.length > 0) {

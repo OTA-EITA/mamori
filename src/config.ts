@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import type { ClientMetadata } from 'oidc-provider';
+import type { ConnectorConfig } from './provisioning/fromConfig.js';
 
 export interface MamoriConfig {
   // Public URL of this server, e.g. https://id.example.co.jp
@@ -19,6 +20,8 @@ export interface MamoriConfig {
   // sets it up during sign-in. Unset means "required" for a new database and
   // "optional" for one upgraded from v0.1 (see resolveMfaPolicy).
   mfa?: 'optional' | 'required';
+  // Outbound provisioning to Google Workspace and Slack (docs/v0.3.md).
+  connectors?: ConnectorConfig[];
   // Audit log lines: "-" for stdout, "off", or a file path.
   auditLog: string;
   // Audit rows older than this are deleted by the hourly cleanup.
@@ -37,6 +40,7 @@ export function loadConfig(path: string): MamoriConfig {
     clients: raw.clients ?? [],
     encryptionKeyFile: raw.encryptionKeyFile ?? 'mamori.key',
     ...(raw.mfa ? { mfa: raw.mfa } : {}),
+    ...(raw.connectors ? { connectors: raw.connectors } : {}),
     auditLog: raw.auditLog ?? '-',
     auditRetentionDays: raw.auditRetentionDays ?? 400,
   };

@@ -32,7 +32,7 @@ function page(title: string, body: string): string {
 </style>
 </head>
 <body>
-<header><strong>mamori admin</strong><a href="/admin/users">Users</a><a href="/admin/groups">Groups</a><a href="/admin/audit">Audit log</a><a href="/account">Your account</a></header>
+<header><strong>mamori admin</strong><a href="/admin/users">Users</a><a href="/admin/groups">Groups</a><a href="/admin/audit">Audit log</a><a href="/admin/provisioning">Provisioning</a><a href="/account">Your account</a></header>
 <main>${body}</main>
 </body>
 </html>`;
@@ -211,5 +211,31 @@ export function adminAuditPage(v: { events: AuditRecord[]; filter: { event: stri
 </form>
 <p class="muted">Newest first, up to 200 events. Times are UTC. The same events go to the audit log output as JSON lines.</p>
 <table><thead><tr><th>Time</th><th>Event</th><th>Who</th><th>About</th><th>Detail</th><th>IP</th><th>App</th></tr></thead><tbody>${rows || '<tr><td colspan="7" class="muted">No events.</td></tr>'}</tbody></table>`,
+  );
+}
+
+export function adminProvisioningPage(v: {
+  connectors: { name: string; group: string }[];
+  jobs: { connector: string; userId: string; email: string | undefined; attempts: number; lastError: string | null; failed: boolean; nextAt: number }[];
+}): string {
+  const connectors = v.connectors.length
+    ? `<table><thead><tr><th>Connector</th><th>Accounts for active members of</th></tr></thead><tbody>${v.connectors
+        .map((c) => `<tr><td>${escape(c.name)}</td><td><a href="/admin/groups/${encodeURIComponent(c.group)}">${escape(c.group)}</a></td></tr>`)
+        .join('')}</tbody></table>`
+    : '<p class="muted">No connectors are configured. Add them under "connectors" in the config file.</p>';
+  const rows = v.jobs
+    .map(
+      (j) => `<tr><td>${escape(j.connector)}</td><td><a href="/admin/users/${escape(j.userId)}">${escape(j.email ?? j.userId)}</a></td>
+<td>${j.failed ? '<span class="danger">gave up</span>' : j.attempts ? `retrying (${j.attempts})` : 'waiting'}</td>
+<td>${j.failed ? '—' : new Date(j.nextAt * 1000).toISOString().slice(0, 16).replace('T', ' ')}</td><td>${escape(j.lastError ?? '')}</td></tr>`,
+    )
+    .join('');
+  return page(
+    'Provisioning',
+    `<h1>Provisioning</h1>
+${connectors}
+<h2>Pending and failed</h2>
+<p class="muted">Changes are sent in the background and retried for up to a day. Run <code>mamori-admin provision reconcile &lt;connector&gt;</code> to compare with the service.</p>
+<table><thead><tr><th>Connector</th><th>User</th><th>State</th><th>Next try (UTC)</th><th>Last error</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="muted">Nothing pending.</td></tr>'}</tbody></table>`,
   );
 }

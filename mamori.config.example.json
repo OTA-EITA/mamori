@@ -8,6 +8,10 @@
   "encryptionKeyFile": "mamori.key",
   "auditLog": "-",
   "auditRetentionDays": 400,
+  "connectors": [
+    { "type": "google-workspace", "group": "google-users", "serviceAccountKeyFile": "google-service-account.json", "adminEmail": "admin@example.co.jp" },
+    { "type": "slack", "group": "slack-users", "tokenFile": "slack-scim-token" }
+  ],
   "clients": [
     {
       "client_id": "intranet",

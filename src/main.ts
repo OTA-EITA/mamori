@@ -13,6 +13,8 @@ import { ConsoleSessions } from './console/sessions.js';
 import { SetupLinks } from './console/setupLinks.js';
 import { scimHandler } from './scim/scim.js';
 import { ScimTokens } from './scim/tokens.js';
+import { Provisioning } from './provisioning/engine.js';
+import { connectorsFromConfig } from './provisioning/fromConfig.js';
 import { PasskeyStore } from './store/passkeys.js';
 import { WebAuthn } from './passkeys/webauthn.js';
 
@@ -33,9 +35,20 @@ const trustProxy = config.trustProxy ?? false;
 const createdBy = (db.prepare("SELECT value FROM settings WHERE key = 'created_by'").get() as { value: string } | undefined)?.value;
 const mfa = resolveMfaPolicy(config, createdBy);
 if (mfa.warning) console.warn(mfa.warning);
+
+// Outbound provisioning: every relevant change queues a sync, and the worker
+// sends them in the background.
+const provisioning = new Provisioning(db, users, groups, connectorsFromConfig(config.connectors), now, audit);
+users.onChange((id) => provisioning.userChanged(id));
+groups.onMembershipChange((id) => provisioning.userChanged(id));
+if (provisioning.connectorNames.length) {
+  provisioning.start();
+  console.log(`provisioning to ${provisioning.connectorNames.join(', ')}`);
+}
+
 const passkeys = new PasskeyStore(db);
 const webauthn = new WebAuthn(config.issuer, config.totpIssuer);
-const account = consoleHandler({ provider, users, sessions, recovery, audit, trustProxy, passkeys, webauthn, groups, setupLinks: new SetupLinks(db, now), issuer: config.issuer, totpIssuer: config.totpIssuer });
+const account = consoleHandler({ provider, users, sessions, recovery, audit, trustProxy, passkeys, webauthn, groups, setupLinks: new SetupLinks(db, now), provisioning, issuer: config.issuer, totpIssuer: config.totpIssuer });
 
 setInterval(() => {
   deleteExpired(db);
