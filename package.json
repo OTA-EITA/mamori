@@ -23,7 +23,7 @@
   "devDependencies": {
     "@types/node": "26.6.6",
     "@types/oidc-provider": "9.13.0",
-    "openid-client": "6.8.8",
+    "openid-client": "6.8.9",
     "typescript": "7.0.2",
     "vitest": "4.1.12"
   },
